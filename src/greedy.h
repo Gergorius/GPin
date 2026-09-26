@@ -9,7 +9,7 @@ This header implements "Greedy" nix expressions. These types eagerly convert the
 
 */
 
-
+#include "fix.h"
 #include <nix/expr/eval.hh>
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/symbol-table.hh>

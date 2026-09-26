@@ -1,14 +1,14 @@
 { pkgs, stdenv, lib, ... }:
 let
 	fs = lib.fileset;
-	der = stdenv.mkDerivation {
+	der = pkgs.clangStdenv.mkDerivation {
 		name = "pun";
 		src = fs.toSource {
 			root = ./src;
 			fileset = ./src;
 		};
 		nativeBuildInputs = with pkgs; [
-			clang
+			cmake
 			nix.dev
 			pkg-config
 		];
@@ -16,7 +16,6 @@ let
 			nix-expr
 			nix-cmd
 		];
-		buildPhase = "clang++ $src/main.cpp $(pkg-config --libs --cflags nix-expr nix-cmd) -o $out";
 	};
 in
 	der
