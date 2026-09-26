@@ -10,7 +10,7 @@ void evalCustomThunk(nix::EvalState& state, const nix::PosIdx pos, nix::Value** 
 	if(thunk->type() != nix::ValueType::nExternal || !(ptr = dynamic_cast<CustomThunk*>(thunk->external()))){
 		state.error<nix::EvalError>("argument to eval custom thunk must be a custom thunk")
 			.atPos(pos)
-			.debugThrow();
+			.panic();
 	}
 	ptr->eval(state, v);
 }

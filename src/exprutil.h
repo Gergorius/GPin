@@ -1,11 +1,15 @@
 #pragma once
 
 #include "greedy.h"
+
 #include <nix/expr/eval.hh>
 #include <nix/expr/nixexpr.hh>
 #include <nix/util/pos-table.hh>
+
+#include <functional>
 #include <type_traits>
 #include <typeindex>
+#include <utility>
 
 using nix::Expr;
 
@@ -47,7 +51,23 @@ decltype(auto) visitDynamicExpr(Expr* expr,Visitor&& visit){
 #undef CASE
 };
 
-#define VSUB_FUN(Name) template<typename Visitor> void visitSubexprs(nix::Name* p,Visitor& visit)
+namespace{
+	template<typename Visitor>
+	struct ConstVisitor{
+		Visitor&& visit;
+		template<typename E>
+		decltype(auto) operator()(const E* arg) && {
+			return std::invoke(std::forward<Visitor>(visit), arg);
+		}
+	};
+}
+
+template<typename Visitor>
+decltype(auto) visitDynamicExpr(const Expr* expr,Visitor&& visit){
+	return visitDynamicExpr(const_cast<Expr*>(expr), ConstVisitor<Visitor>{std::forward<Visitor>(visit)});
+}
+
+#define VSUB_FUN(Name) template<typename Visitor> void visitSubexprs(nix::Name* p,Visitor&& visit)
 
 VSUB_FUN(ExprInt){}
 VSUB_FUN(ExprFloat){}
