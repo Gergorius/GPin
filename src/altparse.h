@@ -39,6 +39,7 @@ struct ParseResult{
 	nix::Expr* rootExpression;
 	// Tokens sorted in encounter order.
 	std::vector<NixToken> tokens;
+	const nix::PosTable::Origin* origin;
 	ParseResult() = default;
 	explicit ParseResult(const ParseResult&) = default; // Copying must be explicit!
 	ParseResult(ParseResult&&) = default;
