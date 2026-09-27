@@ -3,10 +3,13 @@
 #include "altparse.h"
 #include <cstdint>
 #include <nix/expr/eval-error.hh>
+#include <string_view>
 #include <variant>
 
 using std::string;
 using std::string_view;
+
+#define GET_ADI [](const auto& v) -> const AttrsDeclarationInfo&{ return v; }
 
 std::pair<string_view,string_view> detectIndentation(string_view source){
 	string_view preindent = {};
@@ -244,7 +247,7 @@ void eraseNonIsolated(RewriteState& state, SyntaxReference expr){
 	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
 
 	for(uint32_t i = 0;i < decvec.size();i++){
-		eraseDeclaration(state, std::get<BindingInfo>(decvec[i]));
+		eraseDeclaration(state, std::visit(GET_ADI,decvec[i]));
 	}
 }
 
@@ -290,15 +293,13 @@ void eraseDynamicAndInheritAttrs(RewriteState& state, SyntaxReference& expr){
 	for(auto& dyn : expr.getAttrs()->dynamicAttrs.value()){
 		positions.insert(expr.origin.offsetOf(dyn.pos));
 	}
-	if(positions.empty() == 0){
+	if(positions.empty()){
 		return;
 	}
 	auto result = expr.findMemberDeclarationsContaining(state.eval, positions);
-#define ED [](const auto& v) -> const AttrsDeclarationInfo&{ return v; }
 	for(const auto& r : result){
-		eraseDeclaration(state, std::visit(ED,r));
+		eraseDeclaration(state, std::visit(GET_ADI,r));
 	}
-#undef ED
 }
 
 // Find or create the body of the attribute set represented by the specified expression.
@@ -424,7 +425,7 @@ void generateRewrite(RewriteState& state, SyntaxReference expr, nix::Value& valu
 		}
 		eraseDynamicAndInheritAttrs(state, expr);
 		for(auto& attrDef : attrs->attrs.value()){
-			if(bindings.get(attrDef.first) == nullptr){
+			if(bindings.get(attrDef.first) == nullptr && attrDef.second.chooseByKind(true, false, false)){
 				SubexpressionFrame frame;
 				eraseNonIsolated(state, expr.getSubexpression(&frame, attrDef.first));
 			}

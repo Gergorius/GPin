@@ -35,26 +35,26 @@ inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const V
 				cursor++;
 				const NixToken* attrsBegin = cursor;
 				walkToToken(cursor, ';');
-				cursor++;
 				if(visit(index,InheritFromInfo{
 					AttrsDeclarationInfo{begin, cursor},
 					attrsBegin,
 				})){
 					return true;
 				}
+				cursor++;
 			}else{
 				walkToToken(cursor, ';');
-				cursor++;
 				if(visit(index,InheritInfo{
 					AttrsDeclarationInfo{begin,cursor},
 				})){
 					return true;
 				}
+				cursor++;
 			}
 		}else{
 			walkToToken(cursor, '=','.');
 			const NixToken* doteq = cursor;
-			cursor++;
+			walkToToken(cursor,';');
 			if(visit(index,BindingInfo{
 				AttrsDeclarationInfo{begin, cursor},
 				begin,
@@ -62,6 +62,7 @@ inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const V
 			})){
 				return true;
 			}
+			cursor++;
 		}
 	}
 	return false;
@@ -120,7 +121,9 @@ struct CollectPositions{
 		positions.insert(origin.offsetOf(def.pos));
 		if(def.chooseByKind(true, false, false)){
 			const nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(def.e);
-			visitAttributeDefinitions(attrs, *this);
+			if(attrs){
+				visitAttributeDefinitions(attrs, *this);
+			}
 		}
 		return false;
 	}
@@ -342,7 +345,7 @@ std::vector<AttributeDeclaration> SyntaxReference::findAllDeclarations(nix::Eval
 		return {};
 	}
 
-	std::unordered_set<uint32_t> positions;
+	std::unordered_set<uint32_t> positions{};
 
 	nix::ExprAttrs* parent = path->getAttrs();
 	if(path->name.symbol){

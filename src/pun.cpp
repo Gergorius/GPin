@@ -189,7 +189,7 @@ int main(int argc, char ** argv){
 	uint32_t cursor = 0;
 
 	for(Rewrite& rw : rewrite.rewrites){
-		out << string_view(parseResult.sourceString).substr(cursor, cursor - rw.begin);
+		out << string_view(parseResult.sourceString).substr(cursor, rw.begin - cursor);
 		out << rw.replacement;
 		cursor = rw.end;
 	}
