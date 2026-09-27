@@ -64,7 +64,7 @@ struct RewriteState{
 	// String to use for indentation. It is a part of source.
 	const string_view defaultIndent;
 	const string_view source;
-	const nix::SourcePath& sourcePath;
+	const nix::SourcePath& basePath;
 	std::vector<Rewrite> rewrites;
 	inline void addRewrite(Rewrite rw){
 		rewrites.push_back(std::move(rw));
@@ -83,6 +83,7 @@ struct FormatState{
 	string_view preindent;
 	string_view indent;
 	int32_t indentRepeatCount;
+	const nix::SourcePath& basePath;
 	std::ostringstream output;
 	nix::ValueType parentValueType;
 	bool newLine();

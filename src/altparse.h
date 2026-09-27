@@ -43,8 +43,8 @@ public:
 };
 
 struct ParseResult{
-	std::string sourceString;
 	nix::Expr* rootExpression;
+	nix::DocCommentMap docComments;
 	// Tokens sorted in encounter order.
 	std::vector<NixToken> tokens;
 	const nix::PosTable::Origin* origin;
@@ -53,4 +53,4 @@ struct ParseResult{
 	ParseResult(ParseResult&&) = default;
 };
 
-ParseResult parseExprFromString(nix::EvalState& state, const nix::SourcePath& path, nix::Exprs& exprs);
+ParseResult parseExprFromString(nix::EvalState& state, const nix::Pos::Origin& origin, const nix::SourcePath& basePath, nix::Exprs& exprs, std::string_view input);

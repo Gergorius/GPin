@@ -1,8 +1,13 @@
 
 #include "format.h"
 #include "altparse.h"
+#include <cmath>
 #include <cstdint>
+#include <format>
 #include <nix/expr/eval-error.hh>
+#include <nix/expr/value.hh>
+#include <nix/util/source-accessor.hh>
+#include <nix/util/source-path.hh>
 #include <string_view>
 #include <variant>
 
@@ -147,21 +152,55 @@ begin:
 		case nix::nThunk:
 			state.eval.forceValue(value, nix::noPos);
 			goto begin;
+		
 		case nix::nInt:
 		case nix::nBool:
 		case nix::nString: // Indented strings are bugged and fix folk refuse to nix them so we will not use them.
 		case nix::nNull:
-		case nix::nPath: // TODO: It is desirable to convert paths to be relative to current directory.
 			value.print(state.eval, state.output);
 			break;
-		case nix::nFloat:{
-			// https://github.com/NixOS/nix/pull/14784
-			auto v = value.fpoint();
-			const std::ios_base::fmtflags flags = state.output.flags();
-			state.output.setf(std::ios::showpoint);
-			state.output << v;
-			state.output.flags(flags);
+		
+		case nix::nPath:{
+			nix::SourcePath sp = value.path();
+			if(sp.accessor == state.basePath.accessor){
+				const std::string& base = state.basePath.path.abs();
+				const std::string& subp = sp.path.abs();
+				if(subp.starts_with(base)){
+					state.output << "." << subp.substr(base.size());
+				}else{
+					state.output << sp.to_string();
+				}
+			}else{
+				state.output << sp.to_string();
+			}
 			}break;
+		
+		case nix::nFloat:{
+			// Why is this so complicated?
+			auto f = value.fpoint();
+			std::string s;
+			bool brackets = (std::isnan(f) || std::isinf(f) || std::signbit(f)) && state.parentValueType == nix::nList;
+			if(brackets){
+				state.output << "(";
+			}
+			if(std::isnan(f)){
+				state.output << "1.e308*2*0";
+			}else if(std::isinf(f)){
+				if(std::signbit(f)){
+					state.output << "-1.e308*2";
+				}else{
+					state.output << "1.e308*2";
+				}
+			}else if(std::signbit(f) && f == -0.0){
+				state.output << "-1.*0"; // Might as well...
+			}else{
+				std::print(state.output, "{:-#}", f);
+			}
+			if(brackets){
+				state.output << ")";
+			}
+			}break;
+		
 		case nix::nAttrs:{
 			const nix::Bindings& bindings = *value.attrs();
 			if(bindings.size() == 0){
@@ -177,6 +216,7 @@ begin:
 			state.newLine();
 			state.output << "}";
 			}break;
+		
 		case nix::nList:{
 			nix::ListView list = value.listView();
 			if(list.size() == 0){
@@ -198,6 +238,7 @@ begin:
 			state.newLine();
 			state.output << "]";
 			}break;
+		
 		case nix::nFunction:
 		case nix::nExternal:
 		case nix::nFailed:
@@ -444,7 +485,8 @@ void generateRewrite(RewriteState& state, SyntaxReference expr, nix::Value& valu
 
 		if(hasNewBindings){
 			FormatState f{
-				.eval = state.eval
+				.eval = state.eval,
+				.basePath = state.basePath
 			};
 
 			uint32_t depth = findOrDeclareAttributeSet(state, f, expr);
@@ -466,7 +508,8 @@ defaultRewrite:
 	using pos = string_view::size_type;
 
 	FormatState f{
-		.eval = state.eval
+		.eval = state.eval,
+		.basePath = state.basePath
 	};
 
 	bool endSemi = false;

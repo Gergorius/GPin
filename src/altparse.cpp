@@ -51,22 +51,15 @@ struct yyscanner{
 	operator yyscan_t(){ return payload.value(); }
 };
 
-ParseResult parseExprFromString(nix::EvalState& state, const nix::SourcePath& path, nix::Exprs& exprs){
+ParseResult parseExprFromString(nix::EvalState& state, const nix::Pos::Origin& origin, const nix::SourcePath& basePath, nix::Exprs& exprs, std::string_view input){
 
 	ParseResult result{};
-	result.sourceString = path.resolveSymlinks().readFile();
-
-	nix::Pos::Origin origin{path};
-	nix::SourcePath basePath = path.parent();
-
-	auto [it, _] = std::invoke(positionToDocComment,state).try_emplace(path);
-	nix::DocCommentMap* docComments = &it->second;
 
 	{
 		nix::LexerState lexerState{
-			.positionToDocComment = *docComments,
+			.positionToDocComment = result.docComments,
 			.positions = state.positions,
-			.origin = state.positions.addOrigin(origin, result.sourceString.length() + 2),
+			.origin = state.positions.addOrigin(origin, input.length() + 2),
 		};
 		result.origin = std::invoke(posTableResolve,state.positions,state.positions.add(lexerState.origin, 0));
 		nix::ParserState parserState{
@@ -82,7 +75,7 @@ ParseResult parseExprFromString(nix::EvalState& state, const nix::SourcePath& pa
 
 		std::vector<char> pdata;
 		yyscanner scanner(&lexerState);
-		prepareParseData(result.sourceString,pdata);
+		prepareParseData(input,pdata);
 
 		yy_scan_buffer(pdata.data(), pdata.size(), scanner);
 		nix::Parser parser(scanner, &parserState);
@@ -91,7 +84,7 @@ ParseResult parseExprFromString(nix::EvalState& state, const nix::SourcePath& pa
 		result.rootExpression = parserState.result;
 
 		scanner = yyscanner(&lexerState);
-		prepareParseData(result.sourceString, pdata);
+		prepareParseData(input, pdata);
 		yy_scan_buffer(pdata.data(), pdata.size(), scanner);
 
 		nix::Parser::value_type vty;
@@ -102,7 +95,7 @@ ParseResult parseExprFromString(nix::EvalState& state, const nix::SourcePath& pa
 			uint32_t begin = lty.beginOffset;
 			uint32_t end = lty.endOffset;
 #ifndef NDEBUG
-			result.tokens.push_back(NixToken{ rval, begin, end, std::string_view(result.sourceString).substr(begin, end - begin) });
+			result.tokens.push_back(NixToken{ rval, begin, end, input.substr(begin, end - begin) });
 #else
 			result.tokens.push_back(NixToken{ rval, begin, end});
 #endif

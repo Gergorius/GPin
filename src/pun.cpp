@@ -18,6 +18,7 @@
 
 #include <nix/util/pos-idx.hh>
 #include <nix/util/pos-table.hh>
+#include <nix/util/source-path.hh>
 #include <type_traits>
 #include <unordered_map>
 
@@ -159,8 +160,13 @@ int main(int argc, char ** argv){
 	state->updateSymbol = state->symbols.create("update");
 
 	nix::SourcePath file = nix::lookupFileArg(*state, argv[1]);
+	nix::SourcePath basePath = file.parent();
 
-	const ParseResult parseResult = parseExprFromString(*state, file, state->mem.exprs);
+	const std::string fileContent = file.readFile();
+
+	nix::Pos::Origin origin = file;
+
+	const ParseResult parseResult = parseExprFromString(*state, origin, basePath, state->mem.exprs, fileContent);
 	visitDynamicExpr(parseResult.rootExpression, ObtrusiveVisitor{});
 	parseResult.rootExpression->bindVars(*state, state->staticBaseEnv);
 	parseResult.rootExpression->maybeThunk(*state, state->baseEnv);
@@ -168,8 +174,8 @@ int main(int argc, char ** argv){
 	RewriteState rewrite{
 		.eval = *state,
 		.defaultIndent = "",
-		.source = parseResult.sourceString,
-		.sourcePath = file
+		.source = fileContent,
+		.basePath = basePath
 	};
 
 	SyntaxReference root = RawSyntaxReference{
@@ -189,11 +195,11 @@ int main(int argc, char ** argv){
 	uint32_t cursor = 0;
 
 	for(Rewrite& rw : rewrite.rewrites){
-		out << string_view(parseResult.sourceString).substr(cursor, rw.begin - cursor);
+		out << string_view(fileContent).substr(cursor, rw.begin - cursor);
 		out << rw.replacement;
 		cursor = rw.end;
 	}
 
-	out << string_view(parseResult.sourceString).substr(cursor);
+	out << string_view(fileContent).substr(cursor);
 	out.flush();
 }
