@@ -43,7 +43,7 @@ struct yyscanner{
 	}
 	void reset(){
 		if(payload){
-			yylex_destroy(&payload.value());
+			yylex_destroy(payload.value());
 			payload.reset();
 		}
 	}
@@ -101,7 +101,11 @@ ParseResult parseExprFromString(nix::EvalState& state, const nix::SourcePath& pa
 		while((rval = yylex(&vty,&lty,scanner,&parserState)) != 0){
 			uint32_t begin = lty.beginOffset;
 			uint32_t end = lty.endOffset;
+#ifndef NDEBUG
+			result.tokens.push_back(NixToken{ rval, begin, end, std::string_view(result.sourceString).substr(begin, end - begin) });
+#else
 			result.tokens.push_back(NixToken{ rval, begin, end});
+#endif
 		}
 	}
 

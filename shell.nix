@@ -6,6 +6,7 @@
 			nix
 			nix.src
 			clang-tools
+			lldb
 		];
 		inputsFrom = [
 			(pkgs.callPackage ./build.nix {})
