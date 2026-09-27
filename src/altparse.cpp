@@ -7,6 +7,8 @@
 #include <nix/expr/symbol-table.hh>
 #include <nix/lexer-tab.hh>
 #include <nix/parser-tab.hh>
+#include <nix/util/pos-idx.hh>
+#include <nix/util/pos-table.hh>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -14,6 +16,7 @@
 #include "steal.h"
 
 EXPORT_PRIVATE_MEMBER(positionToDocComment, &nix::EvalState::positionToDocComment);
+EXPORT_PRIVATE_MEMBER(posTableResolve, &nix::PosTable::resolve);
 
 static void prepareParseData(std::string_view input,std::vector<char>& pdata){
 	pdata.clear();
@@ -56,7 +59,7 @@ ParseResult parseExprFromString(nix::EvalState& state, const nix::SourcePath& pa
 	nix::Pos::Origin origin{path};
 	nix::SourcePath basePath = path.parent();
 
-	auto [it, _] = (state.*positionToDocComment).try_emplace(path);
+	auto [it, _] = std::invoke(positionToDocComment,state).try_emplace(path);
 	nix::DocCommentMap* docComments = &it->second;
 
 	{
@@ -65,6 +68,7 @@ ParseResult parseExprFromString(nix::EvalState& state, const nix::SourcePath& pa
 			.positions = state.positions,
 			.origin = state.positions.addOrigin(origin, result.sourceString.length() + 2),
 		};
+		result.origin = std::invoke(posTableResolve,state.positions,state.positions.add(lexerState.origin, 0));
 		nix::ParserState parserState{
 			.lexerState = lexerState,
 			.exprs = exprs,
@@ -95,30 +99,8 @@ ParseResult parseExprFromString(nix::EvalState& state, const nix::SourcePath& pa
 
 		NixToken::kind_utype rval;
 		while((rval = yylex(&vty,&lty,scanner,&parserState)) != 0){
-			char* text = yyget_text(scanner);
-			int len = yyget_leng(scanner);
-			YYSTYPE sty = yyget_lval(&scanner);
-			uint32_t begin = text - pdata.data();
-			uint32_t end = begin + len;
-			/*nix::Symbol symbol{};
-			switch(rval){
-				case NixToken::kind_type::STR:
-				case NixToken::kind_type::ID:
-					symbol = state.symbols.create(sty.as<nix::StringToken>());
-					break;
-				case NixToken::kind_type::IF:
-				case NixToken::kind_type::THEN:
-				case NixToken::kind_type::ELSE:
-				case NixToken::kind_type::ASSERT:
-				case NixToken::kind_type::WITH:
-				case NixToken::kind_type::LET:
-				case NixToken::kind_type::IN_KW:
-				case NixToken::kind_type::REC:
-				case NixToken::kind_type::INHERIT:
-				case NixToken::kind_type::OR:
-					symbol = state.symbols.create(std::string_view(result.sourceString).substr(begin, end - begin));
-					break;
-			}*/
+			uint32_t begin = lty.beginOffset;
+			uint32_t end = lty.endOffset;
 			result.tokens.push_back(NixToken{ rval, begin, end});
 		}
 	}

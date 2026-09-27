@@ -21,15 +21,10 @@ using nix::EvalState;
 using nix::Env;
 
 using nix::SymbolTable;
-
-using nix::Expr;
 using nix::ExprSelect;
-using nix::ExprLambda;
-using nix::ExprAttrs;
 using nix::ExprCall;
 using nix::ExprLet;
 using nix::ExprWith;
-using nix::ExprList;
 
 #ifdef GREEDY_IMPL
 #include <memory_resource>
@@ -265,99 +260,87 @@ namespace{
 		}
 	};
 }
-#define IMPL(val) val
-#else
-#define IMPL(val)
 #endif
 
 template<typename T>
 struct Greedy : T{
-	static_assert(false, "No greedy specialisation for this type.");
+	Greedy() = delete;
+	Greedy(const Greedy&) = delete;
 };
+
+#ifdef GREEDY_IMPL
+#define MK_RAW_GREEDY(name) \
+template<> \
+struct Greedy<nix::name> : nix::name{ \
+	Greedy(nix::name&& t); \
+	virtual Value* maybeThunk(EvalState& state, Env& env) override; \
+}; \
+Greedy<nix::name>::Greedy(nix::name&& t): nix::name(std::move(t)){}
+#define MK_GREEDY(name, ...) \
+MK_RAW_GREEDY(name) \
+Value* Greedy<nix::name>::maybeThunk(EvalState& state, Env& env) { \
+	return mkModifiers<nix::name, __VA_ARGS__>(state, env, this); \
+}
+#define MK_EVAL_GREEDY(name) \
+MK_RAW_GREEDY(name) \
+Value* Greedy<nix::name>::maybeThunk(EvalState& state, Env& env) { \
+	Value* v = state.allocValue(); \
+	nix::name::eval(state, env, *v); \
+	return v; \
+}
+#else
+#define MK_RAW_GREEDY(name) \
+template<> \
+struct Greedy<nix::name> : nix::name{ \
+	Greedy(nix::name&& t); \
+	virtual Value* maybeThunk(EvalState& state, Env& env) override; \
+};
+#define MK_GREEDY(name, ...) MK_RAW_GREEDY(name)
+#define MK_EVAL_GREEDY(name) MK_RAW_GREEDY(name)
+#endif
 
 // These expressions have nix thunk types dedicated to them which we can utilise.
 
-template<>
-struct Greedy<ExprLambda> : ExprLambda{
-	virtual Value* maybeThunk(EvalState& state, Env& env) override IMPL({
-		Value* val = state.allocValue();
-		this->eval(state, env, *val);
-		return val;
-	});
-};
+MK_EVAL_GREEDY(ExprAttrs); // Note that evaluating attrs results in the full evaluation of the dynamic attribute names.
+MK_EVAL_GREEDY(ExprList);
+MK_EVAL_GREEDY(ExprLambda); // Lacks a maybeThunk implementation.
+MK_EVAL_GREEDY(ExprPos); // Lacks a maybeThunk implementation.
 
-template<>
-struct Greedy<ExprAttrs> : ExprAttrs{
-	virtual Value* maybeThunk(EvalState& state, Env& env) override IMPL({
-		Value* val = state.allocValue();
-		this->eval(state, env, *val);
-		return val;
-	});
-};
+// These expressions need a little work.
 
-template<>
-struct Greedy<ExprList> : ExprList{
-	virtual Value* maybeThunk(EvalState& state, Env& env) override IMPL({
-		Value* val = state.allocValue();
-		this->eval(state, env, *val);
-		return val;
-	});
-};
-
-template<>
-struct Greedy<ExprCall> : ExprCall{
-	virtual Value* maybeThunk(EvalState& state, Env& env) override IMPL({
-		Value* fThunk = fun->maybeThunk(state, env);
-		for (size_t i = 0; i < args->size(); ++i){
-			Value* n = state.allocValue();
-			n->mkApp(fThunk, (*args)[i]->maybeThunk(state, env));
-			fThunk = n;
-		}
-		return fThunk;
-	});
-};
-
-template<>
-struct Greedy<ExprLet> : ExprLet{
-	virtual Value* maybeThunk(EvalState& state, Env& env) override IMPL({
-		ExprThunkify thunkMaker(this->body);
-		ExprLet copy(this->attrs,&thunkMaker);
-		Value* v = state.allocValue();
-		copy.eval(state, env, *v);
-		return v;
-	});
-};
-
-template<>
-struct Greedy<ExprWith> : ExprWith{
-	virtual Value* maybeThunk(EvalState& state, Env& env) override IMPL({
-		ExprThunkify thunkMaker(this->body);
-		ExprWith copy(this->pos,this->attrs,&thunkMaker);
-		copy.prevWith = this->prevWith;
-		copy.parentWith = this->parentWith;
-		Value* v = state.allocValue();
-		copy.eval(state, env, *v);
-		return v;
-	});
-};
-
-// These expressions do not have nix thunks forcing us to... sigh... make a custom thunk for them. The custom thunk is a primitive operation call with a custom primitive operation and a custom external value as the first argument. Said external value is gc managed and stores everything we need. When the thunk is forced, we construct a temporary copy of the expression object and replace it's subexpression pointers with temporary expressions that evaluate to the value thunks.
+MK_RAW_GREEDY(ExprCall);
+MK_RAW_GREEDY(ExprLet);
+MK_RAW_GREEDY(ExprWith);
 
 #ifdef GREEDY_IMPL
-#define MK_GREEDY(name, ...) \
-template<> \
-struct Greedy<nix::name> : nix::name{ \
-	virtual Value* maybeThunk(EvalState& state, Env& env) override { \
-		return mkModifiers<nix::name, __VA_ARGS__>(state, env, this); \
-	} \
+Value* Greedy<ExprCall>::maybeThunk(EvalState& state, Env& env){
+	Value* fThunk = fun->maybeThunk(state, env);
+	for (size_t i = 0; i < args->size(); ++i){
+		Value* n = state.allocValue();
+		n->mkApp(fThunk, (*args)[i]->maybeThunk(state, env));
+		fThunk = n;
+	}
+	return fThunk;
+};
+Value* Greedy<ExprLet>::maybeThunk(EvalState& state, Env& env){
+	ExprThunkify thunkMaker(this->body);
+	ExprLet copy(this->attrs,&thunkMaker);
+	Value* v = state.allocValue();
+	copy.eval(state, env, *v);
+	return v;
 }
-#else
-#define MK_GREEDY(name, ...) \
-template<> \
-struct Greedy<nix::name> : nix::name{ \
-	virtual Value* maybeThunk(EvalState& state, Env& env) override; \
+Value* Greedy<ExprWith>::maybeThunk(EvalState& state, Env& env){
+	ExprThunkify thunkMaker(this->body);
+	ExprWith copy(this->pos,this->attrs,&thunkMaker);
+	copy.prevWith = this->prevWith;
+	copy.parentWith = this->parentWith;
+	Value* v = state.allocValue();
+	copy.eval(state, env, *v);
+	return v;
 }
 #endif
+
+// These expressions do not have nix thunks forcing us to... sigh... make a custom thunk for them. The custom thunk is a primitive operation call with a custom primitive operation and a custom external value as the first argument. Said external value is gc managed and stores everything we need. When the thunk is forced, we construct a temporary copy of the expression object and replace it's subexpression pointers with temporary expressions that evaluate to the value thunks.
 
 MK_GREEDY(ExprIf, ValueModifier<&ExprIf::cond>, ValueModifier<&ExprIf::then>, ValueModifier<&ExprIf::else_>);
 MK_GREEDY(ExprSelect, ValueModifier<&ExprSelect::e>, SpanModifier<sd_handle{}, symbol_empty{}, ValueModifier<&nix::AttrName::expr>>, ValueModifier<&ExprSelect::def>);

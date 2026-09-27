@@ -30,18 +30,35 @@ struct AttrPathNode{
 	}
 };
 
-void walkToToken(const NixToken *&ptr, NixToken::kind_utype type);
+union SubexpressionFrame{
+	friend struct SyntaxReference;
+	SubexpressionFrame(){}
+private:
+	char raw[sizeof(AttrPathNode)];
+	AttrPathNode node;
+};
 
+// IF the pointer is looking at a token that is known to be paired with some closing token (brackets, LET/IN, WITH/';' or others) walk to the closing token. This method is meant to help with locating the end of expressions which is usually a semicolon or closing bracket that was unaccounted for.
 bool maybeWalkToClosingToken(const NixToken*& ptr);
 
+// Walk the pointer until one of the specified list of token types is encountered. Tokens within brackets are skipped!
+void walkToTokens(const NixToken*& ptr,std::initializer_list<NixToken::kind_utype> types);
+
+// Walk the pointer until one of the specified list of token types is encountered. Tokens within brackets are skipped!
+#define walkToToken(ptr,...) walkToTokens(ptr,{__VA_ARGS__})
+
 struct AttrsDeclarationInfo{
-	const NixToken *begin, *end;
+	// First token of the attribute.
+	const NixToken *begin;
+	// The semicolon at the end of the attribute.
+	const NixToken *endsemi;
 };
 
 struct InheritInfo : AttrsDeclarationInfo{
+
 };
 
-struct InheritFromInfo : InheritInfo{
+struct InheritFromInfo : AttrsDeclarationInfo{
 	const NixToken *attrsBegin;
 };
 
@@ -50,10 +67,9 @@ struct BindingInfo : AttrsDeclarationInfo{
 	const NixToken* doteq;
 	inline BindingInfo next() const{
 		const NixToken* cursor = doteq + 1;
-		maybeWalkToClosingToken(cursor);
-		cursor++;
+		walkToToken(cursor, '=', '.');
 		return BindingInfo{
-			AttrsDeclarationInfo{begin, end},
+			AttrsDeclarationInfo{begin, endsemi},
 			doteq + 1,
 			cursor
 		};
@@ -62,14 +78,17 @@ struct BindingInfo : AttrsDeclarationInfo{
 
 using AttributeDeclaration = std::variant<InheritInfo,InheritFromInfo,BindingInfo>;
 
-struct SyntaxReference{
+struct SyntaxReference;
+
+// Same fields as SyntaxReference but we do not associate a lot of semantics with this one.
+struct RawSyntaxReference{
 	const nix::PosTable::Origin& origin;
 	std::span<const NixToken> boundary;
 	uint32_t pathLength;
 	AttrPathNode* path;
 	nix::Expr* expression;
 	// Find the token containing the position.
-	inline const NixToken* binarySearchPos(nix::PosIdx pos){
+	inline const NixToken* binarySearchPos(nix::PosIdx pos) const{
 		return &*std::lower_bound(boundary.begin(),boundary.end(),NixToken(origin.offsetOf(pos)));
 	}
 	// Start offset of first token.
@@ -80,9 +99,32 @@ struct SyntaxReference{
 	inline uint32_t endOffset() const{
 		return boundary[boundary.size() - 1].end;
 	}
+	// Create a syntax reference to a descendant expression ASSUMING it is an isolated attribute set.
+	SyntaxReference descendToIsolated(nix::ExprAttrs* attrs);
+	// Create a syntax reference to a descendant expression ASSUMING it is a non-empty let expression.
+	SyntaxReference descendToIsolated(nix::ExprLet* let);
+};
+
+/*
+
+How do I put this into words...
+
+SyntaxReference is used for determining where we need to insert rewrites. It tracks the location of a nix expression in the source file. The expression may or may not actually exist and it may or may not be "isolated". We just know roughly where it should be.
+
+SyntaxReference first and foremost maintains an origin and a boundary, which is a span of tokens. And it maintains a pointer to the expression being described. The expression pointer could be null meaning it does not actually exist. Whether it exists or not, we know that the entirety of it's definition is within the boundary. The expression is said to be isolated if the boundary is precisely aligned to this definition. Whenever we reference a non-isolated expression, we also maintain the attribute path with which it is reachable.
+
+It is possible for attribute sets to not have an isolated form because they can be defined in parts. Note that identifying all parts is not always possible but we try our best.
+
+*/
+struct SyntaxReference : RawSyntaxReference{
+	SyntaxReference(RawSyntaxReference&& t): RawSyntaxReference(t){}
+	SyntaxReference(const SyntaxReference&) = delete;
+	SyntaxReference& operator=(const SyntaxReference&) = delete;
+	SyntaxReference(SyntaxReference&&) = default;
+	SyntaxReference& operator=(SyntaxReference&&) = delete;
 	// Get the parent syntax reference for this non-isolated syntax.
-	inline SyntaxReference getParent() const{
-		return SyntaxReference{
+	inline const SyntaxReference getParent() const{
+		return RawSyntaxReference{
 			.origin = origin,
 			.boundary = boundary,
 			.pathLength = pathLength - 1,
@@ -101,9 +143,13 @@ struct SyntaxReference{
 	// Are we the only definition inside a dynamic attribute value?
 	bool isOnlyDefinitionInDynamic() const;
 	bool tryIsolate();
+	// If this is an ExprAttrs or ExprLet, returns the attributes. Otherwise returns nullptr.
 	nix::ExprAttrs* getAttrs();
-	SyntaxReference getSubexpression(AttrPathNode* pathNode,nix::Symbol name);
-	std::vector<AttributeDeclaration> findMemberDeclarationsContaining(nix::EvalState& state,const std::unordered_set<uint32_t>& positions);
+	// Get a reference to a subexpression of this ExprAttrs or ExprLet which may not be dynamic.
+	SyntaxReference getSubexpression(SubexpressionFrame* frame,nix::Symbol name);
+	SyntaxReference getDynamicSubexpression(SubexpressionFrame* frame,uint32_t index);
+	// Find all member declarations that contain at least one position from a set of positions.
+	std::vector<AttributeDeclaration> findMemberDeclarationsContaining(nix::EvalState& state,const std::unordered_set<uint32_t>& positions) const;
 	// Find every place where this non-isolated value is declared! MAY miss empty declarations.
 	std::vector<AttributeDeclaration> findAllDeclarations(nix::EvalState& state) const;
 };

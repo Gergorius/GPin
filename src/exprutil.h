@@ -169,9 +169,8 @@ VSUB_FUN(ExprConcatStrings){
 VSUB_FUN(ExprPos){}
 VSUB_FUN(ExprBlackHole){}
 
-
 template<typename Visitor>
-struct forwardSubexprs{
+struct Subexprs{
 	Visitor visit;
 	template<typename T>
 	void operator()(T* expr){
@@ -181,11 +180,6 @@ struct forwardSubexprs{
 	}
 };
 
-namespace{
-	struct no_visit{
-		template<typename...Args>
-		void operator()(Args... args){}
-	};
+template<typename Visitor> decltype(auto) mkSubexprs(Visitor&& visit){
+	return Subexprs<Visitor>{std::forward<Visitor>(visit)};
 }
-
-template decltype(auto) visitDynamicExpr<forwardSubexprs<no_visit>>(nix::Expr*, forwardSubexprs<no_visit>&&);

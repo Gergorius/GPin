@@ -1,5 +1,9 @@
 
 #include "format.h"
+#include "altparse.h"
+#include <cstdint>
+#include <nix/expr/eval-error.hh>
+#include <variant>
 
 using std::string;
 using std::string_view;
@@ -69,6 +73,12 @@ std::pair<string_view,string_view> detectIndentation(RewriteState& state, uint32
 	return detectIndentation(state.source.substr(lineStart, end - lineStart));
 }
 
+struct chart_info{
+	std::vector<nix::Symbol> path;
+	uint32_t strength; // Already existing paths take priority over paths we make.
+	inline chart_info(): path(), strength(0){}
+};
+
 void chart(nix::Expr* expr, nix::Value* value, std::vector<nix::Symbol>& path, std::unordered_map<nix::Value*, chart_info>& paths){
 	if(!path.empty()){
 		auto& info = paths[value];
@@ -99,12 +109,12 @@ void chart(nix::Expr* expr, nix::Value* value, std::vector<nix::Symbol>& path, s
 }
 
 bool FormatState::newLine(){
-	if(repeatingIndent.size() == 0){
+	if(indent.size() == 0){
 		return false; // No new lines.
 	}
-	output << '\n' << baseIndent;
+	output << '\n' << preindent;
 	for(int32_t i = 0;i < indentRepeatCount;i++){
-		output << repeatingIndent;
+		output << indent;
 	}
 	return true;
 }
@@ -116,6 +126,8 @@ Rewrite FormatState::toRewrite() && {
 		.replacement = std::move(output).str()
 	};
 }
+
+void formatValue(FormatState& state, nix::Value& value);
 
 void formatBinding(FormatState& state, const nix::Attr& attr){
 	state.newLine();
@@ -213,7 +225,7 @@ begin:
 }
 
 void eraseDeclaration(RewriteState& state, const AttrsDeclarationInfo& info){
-	uint32_t endpos = info.end->end;
+	uint32_t endpos = info.endsemi->end;
 	if(state.source[endpos] == '\n'){
 		endpos++;
 		while(state.source[endpos] == ' ' || state.source[endpos] == '\t'){
@@ -227,7 +239,8 @@ void eraseDeclaration(RewriteState& state, const AttrsDeclarationInfo& info){
 	});
 }
 
-void eraseNonIsolated(RewriteState& state, const SyntaxReference& expr){
+// Erase a non-isolated expression.
+void eraseNonIsolated(RewriteState& state, SyntaxReference expr){
 	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
 
 	for(uint32_t i = 0;i < decvec.size();i++){
@@ -235,7 +248,7 @@ void eraseNonIsolated(RewriteState& state, const SyntaxReference& expr){
 	}
 }
 
-std::pair<uint32_t,uint32_t> isolateWithRewrite(RewriteState& state, SyntaxReference& expr){
+/*std::pair<uint32_t,uint32_t> isolateWithRewrite(RewriteState& state, SyntaxReference& expr){
 
 	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
 
@@ -254,7 +267,7 @@ std::pair<uint32_t,uint32_t> isolateWithRewrite(RewriteState& state, SyntaxRefer
 	}
 
 	return { (info.doteq + 1)->begin, (info.end - 1)->end };
-}
+}*/
 
 /*inline bool tryFindAttrsBody(RewriteState& state, SyntaxReference& expr, uint32_t& pos){
 	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
@@ -288,7 +301,9 @@ void eraseDynamicAndInheritAttrs(RewriteState& state, SyntaxReference& expr){
 #undef ED
 }
 
-uint32_t findOrDeclareAttributeSet(RewriteState& rs, FormatState& state, const SyntaxReference& expr){
+// Find or create the body of the attribute set represented by the specified expression.
+template<bool mustExist = false>
+std::conditional_t<mustExist,void,uint32_t> findOrDeclareAttributeSet(RewriteState& rs, FormatState& state, const SyntaxReference& expr){
 	std::span<const NixToken> boundary;
 	const NixToken* cursor;
 	if(expr.isIsolated()){
@@ -301,19 +316,25 @@ uint32_t findOrDeclareAttributeSet(RewriteState& rs, FormatState& state, const S
 		for(uint32_t i = 0;i < decvec.size();i++){
 			BindingInfo& info = std::get<BindingInfo>(decvec[i]);
 			if(info.doteq->type == '='){
-				boundary = { info.begin, info.end };
+				boundary = { info.begin, info.endsemi };
 				cursor = info.doteq;
 				goto walkToBegin;
 			}
 		}
-		uint32_t depth = findOrDeclareAttributeSet(rs, state, expr.getParent());
-		state.newLine();
-		nix::printIdentifier(state.output, state.eval.symbols[expr.path->name.symbol]);
-		state.output << " = {";
-		return depth + 1;
+		if constexpr(mustExist){
+			rs.eval.error<nix::EvalError>("expected to find an attribute set").panic();
+			return;
+		}else{
+			const SyntaxReference parent = expr.getParent();
+			uint32_t depth = findOrDeclareAttributeSet(rs, state, parent);
+			state.newLine();
+			nix::printIdentifier(state.output, state.eval.symbols[expr.path->name.symbol]);
+			state.output << " = {";
+			return depth + 1;
+		}
 	}
 walkToBegin:
-	std::tie(state.baseIndent,state.repeatingIndent) = detectIndentation(rs, boundary[0].begin, boundary[boundary.size() - 1].end);
+	std::tie(state.preindent,state.indent) = detectIndentation(rs, boundary[0].begin, boundary[boundary.size() - 1].end);
 	while(cursor->type != '{'){
 		cursor++;
 	}
@@ -321,7 +342,64 @@ walkToBegin:
 	state.indentRepeatCount = 1;
 	state.begin = cursor->end;
 	state.end = cursor->end;
-	return 0;
+	if constexpr(!mustExist) return 0;
+}
+
+// Prepare for completely rewriting the non-isolated expression. If it does not exist, declare an attribute for it. If it exists, isolate it by emitting rewrites. The caller must remember to add the ending semicolon.
+void findOrDeclareAttribute(RewriteState& rs, FormatState& state, SyntaxReference expr){
+
+	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
+
+	uint32_t i = 0;
+
+	if(decvec.empty() || expr.isInherit()){ // Inherit just won't do for us.
+		const SyntaxReference parent = expr.getParent();
+
+		findOrDeclareAttributeSet<true>(rs, state, parent);
+
+		state.newLine();
+		nix::printIdentifier(state.output, state.eval.symbols[expr.path->name.symbol]);
+		state.output << " = ";
+	}else{
+		const BindingInfo& info = std::get<BindingInfo>(decvec[i++]);
+
+		if(info.doteq->type != '='){
+			BindingInfo si = info.next();
+			while(si.doteq->type == '.'){
+				si = si.next();
+			}
+			rs.addRewrite(Rewrite{
+				.begin = info.doteq->begin,
+				.end = (si.doteq - 1)->end,
+				.replacement = ""
+			});
+			state.begin = si.doteq[1].begin;
+		}else{
+			state.begin = info.doteq[1].begin;
+		}
+		state.end = info.endsemi->end;
+
+		std::tie(state.preindent, state.indent) = detectIndentation(rs, state.begin, state.end);
+
+	}
+
+	while(i < decvec.size()){
+		auto d = decvec[i++];
+
+		if(std::holds_alternative<BindingInfo>(d)){
+			eraseDeclaration(rs, std::get<BindingInfo>(d));
+		}else{
+			// Remove the expression from the inherit.
+			const NixToken* begin = expr.binarySearchPos(expr.expression->getPos());
+			const NixToken* end = begin;
+			maybeWalkToClosingToken(end);
+			rs.addRewrite({
+				.begin = (begin - 1)->end, // ...politely.
+				.end = end->end,
+				.replacement = ""
+			});
+		}
+	}
 }
 
 void finishAttributeSetDeclaration(FormatState& state, uint32_t depth){
@@ -347,16 +425,17 @@ void generateRewrite(RewriteState& state, SyntaxReference expr, nix::Value& valu
 		eraseDynamicAndInheritAttrs(state, expr);
 		for(auto& attrDef : attrs->attrs.value()){
 			if(bindings.get(attrDef.first) == nullptr){
-				AttrPathNode pn;
-				eraseNonIsolated(state, expr.getSubexpression(&pn, attrDef.first));
+				SubexpressionFrame frame;
+				eraseNonIsolated(state, expr.getSubexpression(&frame, attrDef.first));
 			}
 		}
 
 		bool hasNewBindings = false;
 		for(auto& binding : bindings){
 			if(attrs->attrs->contains(binding.name)){
+				SubexpressionFrame frame;
 				AttrPathNode pn;
-				generateRewrite(state, expr.getSubexpression(&pn, binding.name), *binding.value);
+				generateRewrite(state, expr.getSubexpression(&frame, binding.name), *binding.value);
 			}else{
 				hasNewBindings = true;
 			}
@@ -389,18 +468,24 @@ defaultRewrite:
 		.eval = state.eval
 	};
 
+	bool endSemi = false;
+
 	if(expr.tryIsolate()){
 		f.begin = expr.beginOffset();
 		f.end = expr.endOffset();
+		std::tie(f.preindent, f.indent) = detectIndentation(state, f.begin, f.end);
 	}else{
-		std::tie(f.begin,f.end) = isolateWithRewrite(state, expr);
+		findOrDeclareAttribute(state, f, std::move(expr));
+		endSemi = true;
 	}
-
-	std::tie(f.baseIndent, f.repeatingIndent) = detectIndentation(state, f.begin, f.end);
 
 	std::ostringstream stream;
 
 	formatValue(f, value);
+
+	if(endSemi){
+		f.output << ";";
+	}
 
 	state.addRewrite(std::move(f).toRewrite());
 }

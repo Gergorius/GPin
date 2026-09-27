@@ -1,5 +1,8 @@
 
 #include "treewalk.h"
+#include "altparse.h"
+#include <nix/expr/value.hh>
+#include <nix/util/pos-idx.hh>
 
 template<typename Visitor>
 inline bool visitAttributeDefinitions(const nix::ExprAttrs* attrs,const Visitor& visit){
@@ -28,7 +31,7 @@ inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const V
 		const NixToken* begin = cursor;
 		if(cursor->type == NixToken::kind_type::INHERIT){
 			cursor++;
-			if(maybeWalkToClosingToken(cursor)){
+			if(maybeWalkToClosingToken(cursor)){ // Is this inherit-from?
 				cursor++;
 				const NixToken* attrsBegin = cursor;
 				walkToToken(cursor, ';');
@@ -49,14 +52,12 @@ inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const V
 				}
 			}
 		}else{
-			maybeWalkToClosingToken(cursor);
-			cursor++;
+			walkToToken(cursor, '=','.');
 			const NixToken* doteq = cursor;
-			walkToToken(cursor, ';');
 			cursor++;
 			if(visit(index,BindingInfo{
 				AttrsDeclarationInfo{begin, cursor},
-				cursor,
+				begin,
 				doteq
 			})){
 				return true;
@@ -64,6 +65,18 @@ inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const V
 		}
 	}
 	return false;
+}
+
+void walkToTokens(const NixToken*& ptr,std::initializer_list<NixToken::kind_utype> types){
+	while(true){
+		for(auto type : types){
+			if(ptr->type == type){
+				return;
+			}
+		}
+		maybeWalkToClosingToken(ptr);
+		ptr++;
+	}
 }
 
 bool maybeWalkToClosingToken(const NixToken*& ptr){
@@ -98,16 +111,6 @@ bool maybeWalkToClosingToken(const NixToken*& ptr){
 			return true;
 	}
 	return false;
-}
-
-void walkToToken(const NixToken*& ptr,NixToken::kind_utype type){
-	while(true){
-		if(ptr->type == type){
-			return;
-		}
-		maybeWalkToClosingToken(ptr);
-		ptr++;
-	}
 }
 
 struct CollectPositions{
@@ -146,7 +149,7 @@ bool SyntaxReference::tryIsolate(){
 	if(path == nullptr){
 		return true;
 	}
-	if(this->expression == nullptr){
+	if(expression == nullptr){
 		return false;
 	}
 	nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(this->expression);
@@ -183,12 +186,79 @@ bool SyntaxReference::tryIsolate(){
 	return false;
 }
 
+SyntaxReference RawSyntaxReference::descendToIsolated(nix::ExprAttrs* attrs){
+	const NixToken* cursor = binarySearchPos(attrs->getPos());
+	while(cursor->type != '{' && cursor->type != NixToken::kind_type::REC){
+		cursor++;
+	}
+	const NixToken* begin = cursor;
+	while(cursor->type != '{'){
+		cursor++;
+	}
+	maybeWalkToClosingToken(cursor);
+	cursor++;
+	return RawSyntaxReference{
+		.origin = origin,
+		.boundary = {begin, cursor},
+		.pathLength = 0,
+		.path = nullptr,
+		.expression = attrs,
+	};
+}
+
+SyntaxReference RawSyntaxReference::descendToIsolated(nix::ExprLet* let){
+	const NixToken* cursor = boundary.data();
+
+	const NixToken* bestTokLet;
+	const NixToken* bestTokIn;
+
+	while(cursor != boundary.data() + boundary.size()){
+		if(cursor->type == NixToken::kind_type::LET){
+			if(cursor[1].type == '{'){
+				goto continueOuter;
+			}
+			const NixToken* tokLet = cursor;
+			const NixToken* tokIn = cursor;
+			walkToToken(tokIn, NixToken::kind_type::IN_KW);
+
+			nix::PosIdx pos = nix::noPos;
+			for(auto& def : let->attrs->attrs.value()){
+				uint32_t off = origin.offsetOf(def.second.pos);
+				if(off < tokLet->begin){
+					goto breakOuter;
+				}
+				if(tokIn->end < off){
+					goto continueOuter;
+				}
+			}
+			bestTokLet = tokLet;
+			bestTokIn = tokIn;
+		}
+	continueOuter:
+		cursor++;
+	}
+breakOuter:
+	const NixToken* end = bestTokIn;
+	while(end != boundary.data() + boundary.size() && end->type != ')' && end->type != ']' && end->type != '}' && end->type != ';'){
+		maybeWalkToClosingToken(end);
+		end++;
+	}
+	return RawSyntaxReference{
+		.origin = origin,
+		.boundary = {bestTokIn, end},
+		.pathLength = 0,
+		.path = nullptr,
+		.expression = let,
+	};
+}
+
 nix::ExprAttrs* SyntaxReference::getAttrs(){
 	nix::ExprLet* let = dynamic_cast<nix::ExprLet*>(expression);
 	return let == nullptr ? dynamic_cast<nix::ExprAttrs*>(expression) : let->attrs;
 }
 
-SyntaxReference SyntaxReference::getSubexpression(AttrPathNode* pathNode,nix::Symbol name){
+SyntaxReference SyntaxReference::getSubexpression(SubexpressionFrame* frame,nix::Symbol name){
+	AttrPathNode* pathNode = &frame->node;
 	pathNode->parent = this->path;
 	pathNode->expr = this->expression;
 	pathNode->name = name;
@@ -198,7 +268,7 @@ SyntaxReference SyntaxReference::getSubexpression(AttrPathNode* pathNode,nix::Sy
 	if(itr != expr->attrs->end()){
 		sub = itr->second.e;
 	}
-	return SyntaxReference{
+	return RawSyntaxReference{
 		.origin = origin,
 		.boundary = boundary,
 		.pathLength = pathLength + 1,
@@ -207,12 +277,28 @@ SyntaxReference SyntaxReference::getSubexpression(AttrPathNode* pathNode,nix::Sy
 	};
 }
 
-std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContaining(nix::EvalState& state,const std::unordered_set<uint32_t>& positions){
+SyntaxReference SyntaxReference::getDynamicSubexpression(SubexpressionFrame* frame,uint32_t index){
+	AttrPathNode* pathNode = &frame->node;
+	nix::ExprAttrs* expr = pathNode->getAttrs();
+	auto& se = expr->dynamicAttrs->at(index);
+	pathNode->parent = this->path;
+	pathNode->expr = this->expression;
+	pathNode->name = se.nameExpr;
+	return RawSyntaxReference{
+		.origin = origin,
+		.boundary = boundary,
+		.pathLength = pathLength + 1,
+		.path = pathNode,
+		.expression = se.valueExpr
+	};
+}
+
+std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContaining(nix::EvalState& state,const std::unordered_set<uint32_t>& positions) const{
 	if(isIsolated()){
 		std::vector<AttributeDeclaration> vec;
 		traverseAttrsDeclarations(boundary, [&](uint32_t index,const auto& def) -> bool {
 			for(uint32_t pos : positions){
-				if(def.begin->begin <= pos && pos < def.end->begin){
+				if(def.begin->begin <= pos && pos < def.endsemi->end){
 					vec.push_back(def);
 					return false;
 				}
@@ -228,9 +314,9 @@ std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContain
 				const BindingInfo& info = std::get<BindingInfo>(d);
 				switch(info.doteq->type){
 					case '=':{
-						SyntaxReference partition{
+						SyntaxReference partition = RawSyntaxReference{
 							.origin = origin,
-							.boundary = {info.doteq + 1, info.end - 1}, // Remove semicolon
+							.boundary = {info.doteq + 1, info.endsemi},
 							.pathLength = 0,
 							.path = nullptr,
 							.expression = expression,
@@ -252,6 +338,10 @@ std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContain
 
 // Find every place where this non-isolated value is declared! MAY miss empty declarations.
 std::vector<AttributeDeclaration> SyntaxReference::findAllDeclarations(nix::EvalState& state) const{
+	if(expression == nullptr){
+		return {};
+	}
+
 	std::unordered_set<uint32_t> positions;
 
 	nix::ExprAttrs* parent = path->getAttrs();
