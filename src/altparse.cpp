@@ -11,7 +11,6 @@
 #include <nix/util/pos-table.hh>
 #include <optional>
 #include <string_view>
-#include <utility>
 
 #include "steal.h"
 
@@ -51,9 +50,7 @@ struct yyscanner{
 	operator yyscan_t(){ return payload.value(); }
 };
 
-ParseResult parseExprFromString(nix::EvalState& state, const nix::Pos::Origin& origin, const nix::SourcePath& basePath, nix::Exprs& exprs, std::string_view input){
-
-	ParseResult result{};
+void parseExprFromString(ParseResult& result, nix::EvalState& state, const nix::Pos::Origin& origin, const nix::SourcePath& basePath, nix::Exprs& exprs, std::string_view input){
 
 	{
 		nix::LexerState lexerState{
@@ -101,6 +98,4 @@ ParseResult parseExprFromString(nix::EvalState& state, const nix::Pos::Origin& o
 #endif
 		}
 	}
-
-	return result;
 }

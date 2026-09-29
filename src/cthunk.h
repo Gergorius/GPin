@@ -3,6 +3,7 @@
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/value.hh>
 
+// Base class for custom thunks. This can be converted into a nix value thunk which, when forced, calls its eval function.
 struct CustomThunk : nix::ExternalValueBase{
 	virtual void eval(nix::EvalState& state, nix::Value& v) = 0;
 	inline virtual std::ostream & print(std::ostream & str) const override{

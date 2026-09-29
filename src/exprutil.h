@@ -1,14 +1,11 @@
 #pragma once
 
-#include "greedy.h"
-
 #include <nix/expr/eval.hh>
 #include <nix/expr/nixexpr.hh>
 #include <nix/util/pos-table.hh>
 
 #include <functional>
 #include <type_traits>
-#include <typeindex>
 #include <utility>
 
 using nix::Expr;

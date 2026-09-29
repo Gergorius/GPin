@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <format>
 #include <nix/expr/eval-error.hh>
+#include <nix/expr/nixexpr.hh>
 #include <nix/expr/value.hh>
 #include <nix/util/source-accessor.hh>
 #include <nix/util/source-path.hh>
 #include <string_view>
+#include <utility>
 #include <variant>
 
 using std::string;
@@ -178,8 +180,7 @@ begin:
 		case nix::nFloat:{
 			// Why is this so complicated?
 			auto f = value.fpoint();
-			std::string s;
-			bool brackets = (std::isnan(f) || std::isinf(f) || std::signbit(f)) && state.parentValueType == nix::nList;
+			bool brackets = (f < 0.0 || std::isnan(f) || std::isinf(f)) && state.parentValueType == nix::nList;
 			if(brackets){
 				state.output << "(";
 			}
@@ -191,8 +192,6 @@ begin:
 				}else{
 					state.output << "1.e308*2";
 				}
-			}else if(std::signbit(f) && f == -0.0){
-				state.output << "-1.*0"; // Might as well...
 			}else{
 				std::print(state.output, "{:-#}", f);
 			}
@@ -326,12 +325,12 @@ void eraseNonIsolated(RewriteState& state, SyntaxReference expr){
 
 void eraseDynamicAndInheritAttrs(RewriteState& state, SyntaxReference& expr){
 	std::unordered_set<uint32_t> positions;
-	for(auto& exp : expr.getAttrs()->attrs.value()){
+	for(auto& exp : expr.attrs()->attrs.value()){
 		if(exp.second.chooseByKind(false, true, true)){
 			positions.insert(expr.origin.offsetOf(exp.second.pos));
 		}
 	}
-	for(auto& dyn : expr.getAttrs()->dynamicAttrs.value()){
+	for(auto& dyn : expr.attrs()->dynamicAttrs.value()){
 		positions.insert(expr.origin.offsetOf(dyn.pos));
 	}
 	if(positions.empty()){

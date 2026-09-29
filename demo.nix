@@ -1,3 +1,6 @@
+
+# Run gpin-update on this to see how it works.
+
 rec {
 	# Example 1: Update to the latest revision.
 
@@ -39,6 +42,6 @@ rec {
 	# "update" is itself a valid target for updating.
 
 	containmentUnit = {
-		update = {update = { update = { update = "Goodbye";};};};
+		update = {update = {update = {update = "Goodbye";};};};
 	};
 }

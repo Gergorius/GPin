@@ -1,6 +1,7 @@
 
 #include "treewalk.h"
 #include "altparse.h"
+#include <nix/expr/nixexpr.hh>
 #include <nix/expr/value.hh>
 #include <nix/util/pos-idx.hh>
 
@@ -255,9 +256,45 @@ breakOuter:
 	};
 }
 
-nix::ExprAttrs* SyntaxReference::getAttrs(){
+nix::ExprAttrs* SyntaxReference::attrs(){
 	nix::ExprLet* let = dynamic_cast<nix::ExprLet*>(expression);
 	return let == nullptr ? dynamic_cast<nix::ExprAttrs*>(expression) : let->attrs;
+}
+
+SyntaxReference SyntaxReference::getBody(){
+	nix::ExprLet* let = dynamic_cast<nix::ExprLet*>(expression);
+	if(let){
+		const NixToken* cursor = boundary.data();
+		while(cursor->type != NixToken::kind_type::LET){
+			cursor++;
+		}
+		cursor++;
+		walkToToken(cursor, NixToken::kind_type::IN_KW);
+		cursor++;
+		return RawSyntaxReference{
+			.origin = origin,
+			.boundary = {cursor, boundary.data() + boundary.size()},
+			.pathLength = 0,
+			.path = nullptr,
+			.expression = let->body,
+		};
+	}else{
+		nix::ExprWith* with = static_cast<nix::ExprWith*>(expression);
+		const NixToken* cursor = boundary.data();
+		while(cursor->type != NixToken::kind_type::WITH){
+			cursor++;
+		}
+		cursor++;
+		walkToToken(cursor, ';');
+		cursor++;
+		return RawSyntaxReference{
+			.origin = origin,
+			.boundary = {cursor, boundary.data() + boundary.size()},
+			.pathLength = 0,
+			.path = nullptr,
+			.expression = with->body
+		};
+	}
 }
 
 SyntaxReference SyntaxReference::getSubexpression(SubexpressionFrame* frame,nix::Symbol name){
@@ -299,7 +336,7 @@ SyntaxReference SyntaxReference::getDynamicSubexpression(SubexpressionFrame* fra
 std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContaining(nix::EvalState& state,const std::unordered_set<uint32_t>& positions) const{
 	if(isIsolated()){
 		std::vector<AttributeDeclaration> vec;
-		traverseAttrsDeclarations(boundary, [&](uint32_t index,const auto& def) -> bool {
+		traverseAttrsDeclarations(boundary, [&](uint32_t index,const auto& def){
 			for(uint32_t pos : positions){
 				if(def.begin->begin <= pos && pos < def.endsemi->end){
 					vec.push_back(def);
