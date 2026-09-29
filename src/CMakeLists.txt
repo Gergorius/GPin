@@ -2,24 +2,25 @@ cmake_minimum_required(VERSION 3.23)
 
 find_package(PkgConfig REQUIRED)
 
-project(Pun)
+project(GPin)
 
-add_executable(pun)
+add_executable(gpin-update)
 
-target_compile_features(pun PRIVATE cxx_std_23)
+target_compile_features(gpin-update PRIVATE cxx_std_23)
 
 pkg_check_modules(nix REQUIRED IMPORTED_TARGET nix-expr nix-cmd)
 
-target_link_libraries(pun PRIVATE PkgConfig::nix)
+target_link_libraries(gpin-update PRIVATE PkgConfig::nix)
 
-target_sources(pun
-  PRIVATE
-	altparse.cpp
-	format.cpp
-	greedy.cpp
-	treewalk.cpp
-	cthunk.cpp
-	pun.cpp
+target_sources(gpin-update
+	PRIVATE
+		altparse.cpp
+		format.cpp
+		greedy.cpp
+		treewalk.cpp
+		cthunk.cpp
+		update.cpp
+		main.cpp
 )
 
-install(TARGETS pun DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS gpin-update DESTINATION ${CMAKE_INSTALL_BINDIR})

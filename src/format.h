@@ -1,11 +1,6 @@
 
-#include <algorithm>
-#include <bitset>
 #include <compare>
 #include <cstdint>
-#include <functional>
-#include <map>
-#include <memory>
 #include <nix/cmd/common-eval-args.hh>
 #include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-error.hh>
@@ -14,9 +9,6 @@
 #include <nix/store/store-open.hh>
 #include <nix/util/error.hh>
 #include <nix/util/source-path.hh>
-#include <optional>
-#include <ostream>
-#include <span>
 #include <sstream>
 
 #include <nix/expr/nixexpr.hh>
@@ -30,13 +22,8 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <tuple>
-#include <unordered_map>
-#include <unordered_set>
-#include <variant>
 #include <vector>
 
-#include "altparse.h"
 #include "treewalk.h"
 
 using std::string;

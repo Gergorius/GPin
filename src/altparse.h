@@ -53,4 +53,4 @@ struct ParseResult{
 	ParseResult(ParseResult&&) = default;
 };
 
-ParseResult parseExprFromString(nix::EvalState& state, const nix::Pos::Origin& origin, const nix::SourcePath& basePath, nix::Exprs& exprs, std::string_view input);
+void parseExprFromString(ParseResult& result, nix::EvalState& state, const nix::Pos::Origin& origin, const nix::SourcePath& basePath, nix::Exprs& exprs, std::string_view input);

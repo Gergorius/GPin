@@ -1,17 +1,14 @@
 
-#include <compare>
 #include <cstdint>
 #include <nix/expr/eval-error.hh>
 #include <nix/expr/eval.hh>
 #include <nix/expr/symbol-table.hh>
 #include <nix/util/pos-idx.hh>
-#include <set>
 #include <span>
 #include <algorithm>
 
 #include <nix/expr/nixexpr.hh>
 #include <nix/util/pos-table.hh>
-#include <string_view>
 #include <unordered_set>
 #include <variant>
 #include <vector>
@@ -111,7 +108,7 @@ How do I put this into words...
 
 SyntaxReference is used for determining where we need to insert rewrites. It tracks the location of a nix expression in the source file. The expression may or may not actually exist and it may or may not be "isolated". We just know roughly where it should be.
 
-SyntaxReference first and foremost maintains an origin and a boundary, which is a span of tokens. And it maintains a pointer to the expression being described. The expression pointer could be null meaning it does not actually exist. Whether it exists or not, we know that the entirety of it's definition is within the boundary. The expression is said to be isolated if the boundary is precisely aligned to this definition. Whenever we reference a non-isolated expression, we also maintain the attribute path with which it is reachable.
+SyntaxReference first and foremost maintains an origin and a boundary, which is a span of tokens. And it maintains a pointer to the expression being described. The expression pointer could be null meaning it does not actually exist. Whether it exists or not, we know that the entirety of it's definition is within the boundary. The expression is said to be isolated if the boundary is precisely aligned to this definition. (Plus potential surrounding brackets!) Whenever we reference a non-isolated expression, we also maintain the attribute path with which it is reachable.
 
 It is possible for attribute sets to not have an isolated form because they can be defined in parts. Note that identifying all parts is not always possible but we try our best.
 
@@ -144,7 +141,9 @@ struct SyntaxReference : RawSyntaxReference{
 	bool isOnlyDefinitionInDynamic() const;
 	bool tryIsolate();
 	// If this is an ExprAttrs or ExprLet, returns the attributes. Otherwise returns nullptr.
-	nix::ExprAttrs* getAttrs();
+	nix::ExprAttrs* attrs();
+	// Returns the body ASSUMING this is an isolated ExprLet or ExprWith.
+	SyntaxReference getBody();
 	// Get a reference to a subexpression of this ExprAttrs or ExprLet which may not be dynamic.
 	SyntaxReference getSubexpression(SubexpressionFrame* frame,nix::Symbol name);
 	SyntaxReference getDynamicSubexpression(SubexpressionFrame* frame,uint32_t index);
