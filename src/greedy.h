@@ -15,6 +15,7 @@ There are three main special cases:
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/symbol-table.hh>
 #include <nix/expr/value.hh>
+#include <type_traits>
 
 using nix::Value;
 using nix::ValueVector;
@@ -91,10 +92,14 @@ MK_GREEDY_BINOP(ExprOpUpdate);
 
 // Extremely questionably 'replaces' a nix expression with the greedy variant.
 template<typename T,typename G = Greedy<T>>
-void obtrudeAsGreedy(T* arg){
+G* obtrudeAsGreedy(T* arg){
 	// Don't do this at home.
 	static_assert(sizeof(T) == sizeof(G));
 	static_assert(alignof(T) == alignof(G));
+	static_assert(std::is_base_of_v<T, G>);
+
 	T temp(std::move(*arg));
-	new (arg) G(std::move(temp));
+	arg->~T(); // Recall that the destructor must still be called after moving!
+	G* p = new (arg) G(std::move(temp));
+	return p;
 }

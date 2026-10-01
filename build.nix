@@ -4,8 +4,8 @@ let
 	der = pkgs.clangStdenv.mkDerivation {
 		name = "pun";
 		src = fs.toSource {
-			root = ./src;
-			fileset = ./src;
+			root = ./.;
+			fileset = fs.unions [ ./src ./CMakeLists.txt ];
 		};
 		nativeBuildInputs = with pkgs; [
 			cmake
