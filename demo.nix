@@ -44,4 +44,11 @@ rec {
 	containmentUnit = {
 		update = {update = {update = {update = "Goodbye";};};};
 	};
+
+	# Example 7: Mask function.
+
+	# Partially applied primitive operations are preserved.
+
+	maskFunction = 0;
+	update.maskFunction = builtins.bitAnd version;
 }

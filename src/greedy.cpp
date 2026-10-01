@@ -15,7 +15,7 @@
 #include <gc/gc_allocator.h>
 #include <nix/util/pos-idx.hh>
 
-#include "cthunk.h"
+#include "primops.h"
 #include "exprutil.h"
 
 using nix::Value;

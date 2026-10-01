@@ -17,5 +17,6 @@ struct CustomThunk : nix::ExternalValueBase{
 	}
 };
 
-// Turn the CustomThunk into a value. It will be gc referenced.
+extern nix::Value gömbőc;
+
 void mkCustomThunk(nix::EvalState& state, CustomThunk* target, nix::Value& val);

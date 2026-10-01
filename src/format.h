@@ -1,3 +1,4 @@
+#pragma once
 
 #include <compare>
 #include <cstdint>
@@ -22,7 +23,6 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include "treewalk.h"
 
@@ -52,7 +52,8 @@ struct RewriteState{
 	const string_view defaultIndent;
 	const string_view source;
 	const nix::SourcePath& basePath;
-	std::vector<Rewrite> rewrites;
+	using list_Rewrite = std::pmr::list<Rewrite>;
+	list_Rewrite rewrites;
 	inline void addRewrite(Rewrite rw){
 		rewrites.push_back(std::move(rw));
 	}
@@ -72,7 +73,7 @@ struct FormatState{
 	int32_t indentRepeatCount;
 	const nix::SourcePath& basePath;
 	std::ostringstream output;
-	nix::ValueType parentValueType;
+	bool atomic;
 	bool newLine();
 	Rewrite toRewrite() &&;
 };

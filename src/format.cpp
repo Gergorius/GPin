@@ -1,6 +1,9 @@
 
 #include "format.h"
 #include "altparse.h"
+#include "treewalk.h"
+#include "valueutil.h"
+
 #include <cmath>
 #include <cstdint>
 #include <format>
@@ -12,6 +15,9 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+
+#pragma clang diagnostic error "-Wswitch"
+#pragma clang diagnostic error "-Wimplicit-fallthrough"
 
 using std::string;
 using std::string_view;
@@ -143,26 +149,22 @@ void formatBinding(FormatState& state, const nix::Attr& attr){
 	state.newLine();
 	nix::printIdentifier(state.output, state.eval.symbols[attr.name]);
 	state.output << " = ";
-	state.parentValueType = nix::nAttrs;
+	state.atomic = false;
 	formatValue(state, *attr.value);
 	state.output << ";";
 }
 
 void formatValue(FormatState& state, nix::Value& value){
 begin:
-	switch(value.type()){
-		case nix::nThunk:
-			state.eval.forceValue(value, nix::noPos);
-			goto begin;
-		
-		case nix::nInt:
-		case nix::nBool:
-		case nix::nString: // Indented strings are bugged and fix folk refuse to nix them so we will not use them.
-		case nix::nNull:
+	switch(internalType(value)){
+		case nix::tInt:
+		case nix::tBool:
+		case nix::tString: // Indented strings are bugged and fix folk refuse to nix them so we will not use them.
+		case nix::tNull:
 			value.print(state.eval, state.output);
 			break;
 		
-		case nix::nPath:{
+		case nix::tPath:{
 			nix::SourcePath sp = value.path();
 			if(sp.accessor == state.basePath.accessor){
 				const std::string& base = state.basePath.path.abs();
@@ -175,12 +177,12 @@ begin:
 			}else{
 				state.output << sp.to_string();
 			}
-			}break;
+		}break;
 		
-		case nix::nFloat:{
+		case nix::tFloat:{
 			// Why is this so complicated?
 			auto f = value.fpoint();
-			bool brackets = (f < 0.0 || std::isnan(f) || std::isinf(f)) && state.parentValueType == nix::nList;
+			bool brackets = (f < 0.0 || std::isnan(f) || std::isinf(f)) && state.atomic;
 			if(brackets){
 				state.output << "(";
 			}
@@ -198,9 +200,9 @@ begin:
 			if(brackets){
 				state.output << ")";
 			}
-			}break;
+		}break;
 		
-		case nix::nAttrs:{
+		case nix::tAttrs:{
 			const nix::Bindings& bindings = *value.attrs();
 			if(bindings.size() == 0){
 				state.output << "{}";
@@ -214,9 +216,10 @@ begin:
 			state.indentRepeatCount--;
 			state.newLine();
 			state.output << "}";
-			}break;
+		}break;
 		
-		case nix::nList:{
+		case nix::tListN:
+		case nix::tListSmall:{
 			nix::ListView list = value.listView();
 			if(list.size() == 0){
 				state.output << "[]";
@@ -229,40 +232,53 @@ begin:
 				if(!state.newLine() && notFirst){
 					state.output << " ";
 				}
-				state.parentValueType = nix::nList;
+				state.atomic = true;
 				formatValue(state, *val);
 				notFirst = true;
 			}
 			state.indentRepeatCount--;
 			state.newLine();
 			state.output << "]";
-			}break;
+		}break;
+
+		case nix::tPrimOp:{
+			const nix::Value& btin = state.eval.getBuiltins();
+			for(auto& attr : *btin.attrs()){
+				if(NixValueComparer::eq(&value, attr.value)){
+					state.output << "builtins.";
+					nix::printIdentifier(state.output, state.eval.symbols[attr.name]);
+					return;
+				}
+			}
+			state.eval.error<nix::EvalError>("Could not resolve primitive operator %1%", value.primOp()->name).debugThrow();
+		}break;
 		
-		case nix::nFunction:
-		case nix::nExternal:
-		case nix::nFailed:
-		default:
-			if(state.parentValueType == nix::nList){
+		case nix::tPrimOpApp:{
+			bool brackets = state.atomic;
+			if(brackets){
 				state.output << "(";
 			}
-			switch(value.type()){
-				case nix::nFunction:
-					state.output << "abort \"unserialized function\"";
-					break;
-				case nix::nExternal:
-					state.output << "abort \"unserialized external value\"";
-					break;
-				case nix::nFailed:
-					state.output << "abort \"failed evaluation\"";
-					break;
-				default:
-					state.output << "abort \"unserialized unknown value\"";
-					break;
-			}
-			if(state.parentValueType == nix::nList){
+			state.atomic = false;
+			formatValue(state, *value.primOpApp().left);
+			state.output << " ";
+			state.atomic = true;
+			formatValue(state, *value.primOpApp().right);
+			if(brackets){
 				state.output << ")";
 			}
+		}break;
+		
+		case nix::tThunk:
+		case nix::tUninitialized:
+		case nix::tApp:
+			state.eval.error<nix::EvalError>("unexpected value").panic();
+			break;
+		case nix::tExternal:
+		case nix::tFailed:
+		case nix::tLambda:
+		case nix::tNumberOfInternalTypes:
 			state.eval.error<nix::EvalError>("cannot serialize value").debugThrow();
+			break;
 			break;
 	}
 }
@@ -290,38 +306,6 @@ void eraseNonIsolated(RewriteState& state, SyntaxReference expr){
 		eraseDeclaration(state, std::visit(GET_ADI,decvec[i]));
 	}
 }
-
-/*std::pair<uint32_t,uint32_t> isolateWithRewrite(RewriteState& state, SyntaxReference& expr){
-
-	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
-
-	const BindingInfo& info = std::get<BindingInfo>(decvec[0]);
-	
-	if(info.doteq->type != '='){
-		state.addRewrite(Rewrite{
-			.begin = info.doteq->begin,
-			.end = info.doteq->end,
-			.replacement = "="
-		});
-	}
-
-	for(uint32_t i = 1;i < decvec.size();i++){ // Intentional: First is skipped.
-		eraseDeclaration(state, std::get<BindingInfo>(decvec[i]));
-	}
-
-	return { (info.doteq + 1)->begin, (info.end - 1)->end };
-}*/
-
-/*inline bool tryFindAttrsBody(RewriteState& state, SyntaxReference& expr, uint32_t& pos){
-	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
-
-	for(uint32_t i = 0;i < decvec.size();i++){
-		BindingInfo& info = std::get<BindingInfo>(decvec[i]);
-		if(info.doteq->type == '='){
-
-		}
-	}
-}*/
 
 void eraseDynamicAndInheritAttrs(RewriteState& state, SyntaxReference& expr){
 	std::unordered_set<uint32_t> positions;
@@ -379,7 +363,7 @@ walkToBegin:
 	while(cursor->type != '{'){
 		cursor++;
 	}
-	state.parentValueType = nix::nAttrs;
+	state.atomic = true;
 	state.indentRepeatCount = 1;
 	state.begin = cursor->end;
 	state.end = cursor->end;

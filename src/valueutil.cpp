@@ -1,165 +1,334 @@
 
 #include "valueutil.h"
+#include "steal.h"
+
+#include <cmath>
+#include <gc/gc_allocator.h>
 #include <nix/expr/attr-set.hh>
+#include <nix/expr/eval-error.hh>
+#include <nix/expr/eval.hh>
 #include <nix/expr/value.hh>
+#include <nix/util/error.hh>
+#include <nix/util/fmt.hh>
+#include <nix/util/pos-idx.hh>
 #include <nix/util/source-path.hh>
-#include <deque>
 #include <unordered_set>
 #include <boost/container_hash/hash.hpp>
 
-size_t NixValueHash::operator()(nix::Value* vptr) const{
+// If these change I better know...
+static_assert(std::is_trivially_destructible_v<nix::Value>);
+static_assert(std::is_trivially_copy_constructible_v<nix::Value>);
+static_assert(std::is_trivially_copy_assignable_v<nix::Value>);
+static_assert(std::is_trivially_move_constructible_v<nix::Value>);
+static_assert(std::is_trivially_move_assignable_v<nix::Value>);
+
+EXPORT_PRIVATE_MEMBER(getInternalType,&nix::Value::getInternalType);
+
+using nix::InternalType;
+
+InternalType internalType(const nix::Value& v){
+	return std::invoke(getInternalType,v);
+}
+
+#pragma clang diagnostic error "-Wswitch"
+#pragma clang diagnostic error "-Wimplicit-fallthrough"
+
+size_t NixValueComparer::hash(nix::Value* vptr){
 	size_t sum = std::hash<nix::ValueType>{}(vptr->type()) * 31;
-	switch(vptr->type()){
-		case nix::nInt:
+	switch(internalType(*vptr)){
+		case nix::tInt:
 			sum += std::hash<nix::NixInt::Inner>{}(vptr->integer().value);
 			break;
-		case nix::nFloat:
-			sum += std::hash<nix::NixFloat>{}(vptr->fpoint());
-			break;
-		case nix::nBool:
+		case nix::tBool:
 			sum += std::hash<bool>{}(vptr->boolean());
 			break;
-		case nix::nString:
-			sum += std::hash<std::string_view>{}(vptr->string_view());
+		case nix::tFloat:
+			sum += std::hash<nix::NixFloat>{}(vptr->fpoint());
 			break;
-		case nix::nPath:
-			sum += std::hash<std::string_view>{}(vptr->pathStrView());
+		case nix::tExternal:
+			sum = sum + std::hash<std::string>{}(vptr->external()->showType());
 			break;
-		case nix::nAttrs:
+		case nix::tPrimOp:
+			sum = sum + std::hash<const void*>{}(vptr->primOp());
+			break;
+		case nix::tAttrs:
 			for(auto& attr : *vptr->attrs()){
 				sum = sum ^ (std::hash<uint32_t>{}(attr.name.getId()) * 31 + std::hash<nix::ValueType>{}(attr.value->type()));
 			}
 			break;
-		case nix::nList:
+		case nix::tPrimOpApp:
+			sum = sum + hash(vptr->primOpApp().left) * 31 + hash(vptr->primOpApp().right);
+			break;
+		case nix::tThunk:
+			sum = (sum + std::hash<const void*>{}(vptr->thunk().env)) * 31 + std::hash<const void*>{}(vptr->thunk().expr);
+			break;
+		case nix::tLambda:
+			sum = (sum + std::hash<void*>{}(vptr->lambda().env)) * 31 + std::hash<void*>{}(vptr->lambda().fun);
+			break;
+		case nix::tString:
+			sum += std::hash<std::string_view>{}(vptr->string_view());
+			break;
+		case nix::tPath:
+			sum += std::hash<std::string_view>{}(vptr->pathStrView());
+			break;
+		case nix::tListN:
+		case nix::tListSmall:
 			for(nix::Value* elem : vptr->listView()){
 				sum = (sum + std::hash<nix::ValueType>{}(elem->type())) * 31;
 			}
 			break;
-		case nix::nFunction:{
-			if(vptr->isPrimOp()){
-				sum = sum + std::hash<const void*>{}(vptr->primOp());
-			}else if(vptr->isLambda()){
-				sum = (sum + std::hash<void*>{}(vptr->lambda().env)) * 31 + std::hash<void*>{}(vptr->lambda().fun);
-			}else if(vptr->isPrimOpApp()){
-				sum = sum + (*this)(vptr->primOpApp().left) * 31 + (*this)(vptr->primOpApp().right);
-			}
-			}break;
-		case nix::nExternal:
-			sum = sum + std::hash<std::string>{}(vptr->external()->showType());
-			break;
-		case nix::nThunk:
-			if(vptr->isThunk()){
-				sum = (sum + std::hash<const void*>{}(vptr->thunk().env)) * 31 + std::hash<const void*>{}(vptr->thunk().expr);
-			}
-		case nix::nFailed:
-		case nix::nNull:
+		case nix::tUninitialized:
+		case nix::tFailed:
+		case nix::tNull:
+		case nix::tApp:
+		case nix::tNumberOfInternalTypes:
 			break;
 	}
 	return sum;
 }
 
-bool NixValueEq::operator()(nix::Value* l,nix::Value* r) const{
-#define GUARD(a,b) if(a != b){ return false; }
-	if(l == r){
-		return true;
-	}
-	GUARD(l->type(),r->type());
-
+bool NixValueComparer::eq(nix::Value* l,nix::Value* r){
 	using pair_type = std::pair<nix::Value*,nix::Value*>;
 
-	std::array<std::byte, 0x5000> buf;
-
+	std::array<std::byte, 0x1000> buf;
 	std::pmr::monotonic_buffer_resource res{buf.data(),buf.size()};
-
-	std::pmr::deque<pair_type> queue{&res};
 	std::pmr::unordered_set<pair_type,boost::hash<pair_type>> seen{&res};
 
-	seen.insert({l,r});
-
-#define RECURSIVE_EQ(a,b) if((a) != (b)){ GUARD((a)->type(),(b)->type()); if(!seen.insert({(a),(b)}).second){ queue.push_back({(a),(b)}); }}
-
-	while(true){
-		switch(l->type()){
-			case nix::nInt:
-				GUARD(l->integer(),r->integer());
-				break;
-			case nix::nFloat:{
-				if(std::isnan(l->fpoint()) && std::isnan(r->fpoint())){
-					break; // Reflexivity is more important to us than "accuracy".
-				}
-				// That being said, we do not tell negative and positive zeroes apart because neither does nix.
-				GUARD(l->fpoint(),r->fpoint());
-				}break;
-			case nix::nBool:
-				GUARD(l->boolean(),r->boolean());
-				break;
-			case nix::nString:
-				GUARD(l->string_view(),r->string_view());
-				break;
-			case nix::nPath:
-				GUARD(*l->path().accessor,*r->path().accessor);
-				GUARD(l->path().path,r->path().path);
-				break;
-			case nix::nNull:
-				break;
-			case nix::nThunk:
-				if(l->isApp() && r->isApp()){
-					RECURSIVE_EQ(l->app().left, r->app().right);
-					RECURSIVE_EQ(l->app().right, r->app().right);
-					break;
-				}else if(l->isThunk() && r->isThunk()){
-					GUARD(l->thunk().env,r->thunk().env);
-					[[unlikely]];
-					GUARD(l->thunk().expr,r->thunk().expr);
-					break;
-				}
-				return false;
-			case nix::nAttrs:{
-				const nix::Bindings& lb = *l->attrs();
-				const nix::Bindings& rb = *r->attrs();
-				GUARD(lb.size(),rb.size());
-				auto li = lb.begin();
-				auto ri = rb.begin();
-				for(size_t i = 0;i < lb.size();i++){
-					GUARD(li->name,ri->name);
-					RECURSIVE_EQ(li->value, ri->value);
-					li++;
-					ri++;
-				}
-				}break;
-			case nix::nList:{
-				auto li = l->listView();
-				auto ri = r->listView();
-				GUARD(li.size(),ri.size());
-				for(size_t i = 0;i < li.size();i++){
-					RECURSIVE_EQ(li[i], ri[i]);
-				}
-				}break;
-			case nix::nFunction:
-				if(l->isLambda() && r->isLambda()){
-					GUARD(l->lambda().env,r->lambda().env);
-					GUARD(l->lambda().fun,r->lambda().fun);
-					break;
-				}else if(l->isPrimOp() && r->isPrimOp()){
-					GUARD(l->primOp(),r->primOp());
-					break;
-				}else if(l->isPrimOpApp() && r->isPrimOpApp()){
-					RECURSIVE_EQ(l->primOpApp().left, r->primOpApp().right);
-					RECURSIVE_EQ(l->primOpApp().right, r->primOpApp().right);
-					break;
-				}
-				return false;
-			case nix::nExternal:
-				GUARD(*l->external(),*r->external());
-				break;
-			case nix::nFailed:
-				return false;
-		}
-
-		if(queue.empty()){
+	return [&seen](this const auto & recurse,nix::Value* l,nix::Value* r){
+		if(l == r){
 			return true;
 		}
-		std::tie(l,r) = queue.back();
-		queue.pop_back();
-	}
+
+#define GUARD(a,b) if(a != b){ return false; }
+#define CHK(str) (l str == r str)
+#define REC(str) (recurse((l str),(r str)))
+
+		GUARD(internalType(*l),internalType(*r));
+		if(!seen.insert({l,r}).second){
+			return true;
+		}
+		switch(internalType(*l)){
+			case nix::tInt: return CHK(->integer());
+			case nix::tFloat:
+				if(std::isnan(l->fpoint()) && std::isnan(r->fpoint())){
+					return true; // Reflexivity is more important to us than "accuracy".
+				}
+				// That being said, we do not tell negative and positive zeroes apart because neither does nix.
+				return CHK(->fpoint());
+			case nix::tBool: return CHK(->boolean());
+			case nix::tString: return CHK(->string_view());
+			case nix::tPath: return CHK(->path());
+			case nix::tNull: return true;
+			case nix::tThunk: return CHK(->thunk().env) && CHK(->thunk().expr);
+			case nix::tApp: return REC(->app().left) && REC(->app().right);
+			case nix::tAttrs:{
+				GUARD(l->attrs()->size(),r->attrs()->size());
+				for(size_t i = 0;i < l->attrs()->size();i++){
+					GUARD((*l->attrs())[i].name,(*r->attrs())[i].name);
+					if(!recurse((*l->attrs())[i].value,(*r->attrs())[i].value)){
+						return false;
+					}
+				}
+				}break;
+			case nix::tListSmall:
+			case nix::tListN:{
+				GUARD(l->listSize(),r->listSize());
+				for(size_t i = 0;i < l->listSize();i++){
+					if(!recurse(l->listView()[i],r->listView()[i])){
+						return false;
+					}
+				}
+				}break;
+			case nix::tLambda: return CHK(->lambda().env) && CHK(->lambda().fun);
+			case nix::tPrimOp: return CHK(->primOp());
+			case nix::tPrimOpApp: return REC(->primOpApp().left) && REC(->primOpApp().right);
+			case nix::tExternal: return *(l->external()) == *(r->external());
+			case nix::tFailed:
+			case nix::tUninitialized:
+			case nix::tNumberOfInternalTypes:
+				break;
+		}
+		return false;
+	}(l,r);
+}
+
+#undef REC
+
+void deeperForce(nix::EvalState& state, nix::Value& value){
+
+	nix::Value* v = &value;
+
+	std::unordered_set<nix::Value*> seen;
+
+	[&state,&seen](this const auto & recurse, nix::Value* v){
+        auto _cd = state.addCallDepth(v->determinePos(nix::noPos));
+		
+		if(!seen.insert(v).second)
+			return;
+
+		state.forceValue(*v, v->determinePos(nix::noPos));
+
+		switch(internalType(*v)){
+			case nix::tAttrs:
+				for(auto& binding : *v->attrs()){
+                	try{
+						recurse(binding.value);
+					}catch(nix::Error& e){
+						e.addTrace(state.positions[binding.pos], nix::HintFmt("while evaluating the attribute '%1%'", state.symbols[binding.name]));
+						throw;
+					}
+				}
+				break;
+			case nix::tListSmall:
+			case nix::tListN:
+				for(uint32_t i = 0;i < v->listSize();i++){
+					try{
+						recurse(v->listView()[i]);
+					}catch(nix::Error& e){
+						e.addTrace(nullptr, nix::HintFmt("while evaluating list element at index %1%", i));
+						throw;
+					}
+				}
+				break;
+			case nix::tPrimOpApp:
+				do{
+					try{
+						recurse(v->primOpApp().right);
+					}catch(nix::Error& e){
+						uint32_t opIndex = 1;
+						nix::Value* t = v->primOpApp().left;
+						while(t->isPrimOpApp()){
+							opIndex++;
+							t = t->primOpApp().left;
+						}
+						e.addTrace(nullptr, nix::HintFmt("while evaluating operand %1% of %2%", opIndex, t->primOp()->name));
+						throw;
+					}
+					v = v->primOpApp().left;
+				}while(!v->isPrimOp());
+				break;
+			case nix::tApp:
+			case nix::tThunk:
+				state.error<nix::EvalError>("EvalState::force resulted in a thunk...?").panic();
+				break;
+			case nix::tUninitialized:
+			case nix::tInt:
+			case nix::tBool:
+			case nix::tNull:
+			case nix::tFloat:
+			case nix::tFailed:
+			case nix::tExternal:
+			case nix::tPrimOp:
+			case nix::tLambda:
+			case nix::tString:
+			case nix::tPath:
+			case nix::tNumberOfInternalTypes:
+				break;
+		}
+	}(&value);
+}
+
+void deduplicateSubvalues(nix::EvalState& state, nix::Value*& value){
+	std::unordered_map<nix::Value*, nix::Value*, NixValueComparer, NixValueComparer, traceable_allocator<std::pair<nix::Value* const,nix::Value*>>> pool;
+
+#define RT -> std::pair<nix::Value*,bool>
+
+	auto root = [&state,&pool](this const auto & recurse, nix::Value* value) RT{
+
+		// return.first: Pointer to canonical value.
+		// return.second: Whether the canonical value is a PERFECT copy of the argument value. (Perfect means nix code cannot observe the difference.)
+
+		nix::Value* p1;
+		nix::Value** p2;
+		bool inserted;
+		{
+			auto [itr, inserted0] = pool.insert({value, value});
+			inserted = inserted0;
+			p1 = itr->second;
+			p2 = &itr->second;
+		}
+
+#define SC if(!inserted){ return {p1, p1 == value}; } *p2 = p1 = state.allocValue();
+
+		bool perfect = true;
+
+#define REC(n,v) nix::Value* n; if(perfect){ std::tie(n,perfect) = recurse(v); }else{ n = recurse(v).first; }
+
+		switch(internalType(*value)){
+			case nix::tPrimOpApp:{ SC;
+				REC(l,value->primOpApp().left);
+				REC(r,value->primOpApp().right);
+				if(perfect){
+					p1 = *p2 = value;
+				}
+				p1->mkPrimOpApp(l,r);
+			}break;
+			case nix::tApp:{ SC;
+				REC(l,value->app().left);
+				REC(r,value->app().right);
+				if(perfect){
+					p1 = *p2 = value;
+				}
+				p1->mkApp(l,r);
+			}break;
+			case nix::tListSmall:
+			case nix::tListN:{ SC;
+				nix::ListBuilder builder = state.buildList(value->listSize());
+				for(size_t i = 0;i < value->listSize();i++){
+					REC(v,value->listView()[i]);
+					builder.elems[i] = v;
+				}
+				if(perfect){
+					p1 = *p2 = value;
+				}
+				p1->mkList(builder);
+			}break;
+			case nix::tAttrs:{ SC;
+				nix::Bindings* newBindings = state.mem.allocBindings(value->attrs()->size());
+				newBindings->pos = value->attrs()->pos;
+				for(size_t i = 0;i < value->attrs()->size();i++){
+					const nix::Attr& a = (*value->attrs())[i];
+					(*newBindings)[i] = a;
+					REC(v,a.value);
+					(*newBindings)[i].value = v;
+				}
+				if(perfect){
+					p1 = *p2 = value;
+				}
+				p1->mkAttrs(newBindings);
+			}break;
+
+			// Deduplicating values that do not compare equal to themselves produces an observable side effect.
+			
+			case nix::tLambda:
+			case nix::tPrimOp:
+			case nix::tThunk:
+			case nix::tFailed:
+				perfect = p1 == value;
+				break;
+			case nix::tFloat:
+				perfect = p1 == value || !std::isnan(value->fpoint());
+				break;
+			
+			// The following values can be deduplicated just fine.
+
+			case nix::tInt:
+			case nix::tBool:
+			case nix::tNull:
+			case nix::tPath:
+			case nix::tString:
+			case nix::tExternal:
+				break;
+			
+			// The following values are errors.
+
+			case nix::tUninitialized:
+			case nix::tNumberOfInternalTypes:
+				state.error<nix::EvalError>("Bad value!").panic();
+				break;
+		}
+		return {p1, perfect};
+	}(value);
+
+	value = root.first;
 }

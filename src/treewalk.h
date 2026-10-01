@@ -1,3 +1,4 @@
+#pragma once
 
 #include <cstdint>
 #include <nix/expr/eval-error.hh>
@@ -110,7 +111,7 @@ SyntaxReference is used for determining where we need to insert rewrites. It tra
 
 SyntaxReference first and foremost maintains an origin and a boundary, which is a span of tokens. And it maintains a pointer to the expression being described. The expression pointer could be null meaning it does not actually exist. Whether it exists or not, we know that the entirety of it's definition is within the boundary. The expression is said to be isolated if the boundary is precisely aligned to this definition. (Plus potential surrounding brackets!) Whenever we reference a non-isolated expression, we also maintain the attribute path with which it is reachable.
 
-It is possible for attribute sets to not have an isolated form because they can be defined in parts. Note that identifying all parts is not always possible but we try our best.
+It is possible for attribute sets to not have an isolated form because they can be defined in parts. Note that identifying the parts is on a best reasonable effort basis, therefore it is possible for us to miss parts, even non-empty ones.
 
 */
 struct SyntaxReference : RawSyntaxReference{

@@ -3,6 +3,8 @@
 #include "exprutil.h"
 #include "steal.h"
 #include "altparse.h"
+#include "valueutil.h"
+#include "format.h"
 
 #include <boost/container_hash/hash.hpp>
 #include <functional>
@@ -11,13 +13,16 @@
 #include <nix/expr/eval.hh>
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/value.hh>
+#include <nix/util/error.hh>
 #include <nix/util/pos-idx.hh>
 #include <nix/util/position.hh>
 #include <nix/util/source-path.hh>
 #include <nix/util/util.hh>
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include <ostream>
+#include <ranges>
 #include <string>
+#include <vector>
 
 EXPORT_PRIVATE_MEMBER(getImportResolutionCache, &nix::EvalState::importResolutionCache);
 EXPORT_PRIVATE_MEMBER(getFileEvalCache, &nix::EvalState::fileEvalCache);
@@ -63,8 +68,67 @@ Value* RecordedExprAttrs::maybeThunk(EvalState& state, Env& env){
 	return val;
 };
 
+// Now it would be nice if we did not have to use object obtrusion. An idea I had is to make a temporary Exprs memory and later on move the expression tree to the permanent memory provided by EvalState. Nix helps with this: The bindVars implementation of some expressions will helpfully move data to the new memory. The problem is they do not move all of it. ExprLambda for example will leave it's formals in the old memory. Which is problematic if the old memory is temporary.
+
+// We have three options:
+// Use temporary memory anyway and special case expressions that do it poorly.
+// Use the main memory and create custom copies of expressions in it. This will leak the memory occupied by the old objects.
+// Use the main memory and replace expression objects with their modified variants.
+// I chose the latter and hope I have enough static asserts in place so that I don't shoot my leg off later. Nix is not being helpful because some expressions' constructors are annoying or perform allocation. The RAII goblins work against us and our only saving grace are the move constructors that survived their onslaught.
+
+// #define UPDATE_USE_RELOCATION // Do not. The implementation for this is incomplete. WILL crash.
+
+struct RelocatingVisitor{
+#ifdef UPDATE_USE_RELOCATION
+	nix::Exprs& exprs;
+	RelocatingVisitor(nix::Exprs& e): exprs(e){}
+	void operator()(nix::Expr*) const{}
+	template<typename T>
+	void operator()(T* expr) const{
+		expr = exprs.add<T>(std::move(*expr));
+		visitSubexprs(expr,[&](nix::Expr* expr){ visitDynamicExpr(expr, *this); });
+	}
+#else
+	void operator()(nix::Expr*) const{}
+	RelocatingVisitor(nix::Exprs& e){}
+#endif
+};
+
+struct ObtrusiveVisitor : private RelocatingVisitor{
+	using RelocatingVisitor::RelocatingVisitor;
+	const RelocatingVisitor& rv() const{
+		return *this;
+	}
+	void operator()(nix::Expr* expr) const{ rv()(expr); }
+	template<typename T> struct replacement{ using type = Greedy<T>; };
+	template<> struct replacement<nix::ExprAttrs>{ using type = RecordedExprAttrs; };
+#define SELF_REPLACE(name) template<> struct replacement<nix::name>{ using type = nix::name; }
+	SELF_REPLACE(Expr);
+	SELF_REPLACE(ExprFloat);
+	SELF_REPLACE(ExprInt);
+	SELF_REPLACE(ExprString);
+	SELF_REPLACE(ExprVar);
+	SELF_REPLACE(ExprPath);
+	SELF_REPLACE(ExprInheritFrom);
+	SELF_REPLACE(ExprBlackHole);
+	template<typename T>
+	void operator()(T* op) const{
+		using TR = typename replacement<T>::type;
+#ifdef UPDATE_USE_RELOCATION
+		TR* ap = rv.exprs.add<TR>(std::move(*op));
+#else
+		TR* ap = obtrudeAsGreedy<T,TR>(op);
+#endif
+		if constexpr(std::is_same_v<T, nix::ExprLambda>){
+			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicExpr(expr, rv()); });
+		}else{
+			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicExpr(expr, *this); });
+		}
+	}
+};
+
 nix::Value* processParseResult(EvalStateForUpdate& state, SourceInfo& info){
-	visitDynamicExpr(info.parseResult.rootExpression, ObtrusiveVisitor{});
+	visitDynamicExpr(info.parseResult.rootExpression, ObtrusiveVisitor{state.mem.exprs});
 	info.parseResult.rootExpression->bindVars(state, state.staticBaseEnv);
 	nix::Value* v = info.parseResult.rootExpression->maybeThunk(state,state.baseEnv);
 	info.value = nix::allocRootValue(v);
@@ -94,7 +158,12 @@ const SourceInfo& loadFileImpl(EvalStateForUpdate& state, const nix::SourcePath&
 	info.content = std::make_shared<std::string>(file.readFile());
 
     nix::Pos::Origin origin = file;
-	parseExprFromString(info.parseResult, state, origin, info.basePath, state.mem.exprs, *info.content);
+#ifdef UPDATE_USE_RELOCATION
+	nix::Exprs exprs;
+#else
+	nix::Exprs& exprs = state.mem.exprs;
+#endif
+	parseExprFromString(info.parseResult, state, origin, info.basePath, exprs, *info.content);
 	fileEvalCache.emplace(file,processParseResult(state, info));
 	return info;
 }
@@ -111,7 +180,12 @@ const SourceInfo& loadStringImpl(EvalStateForUpdate& state, nix::SourcePath base
 		? nix::Pos::Origin(nix::Pos::Stdin (nix::ref<std::string>(dataPointer)))
 		: nix::Pos::Origin(nix::Pos::String(nix::ref<std::string>(dataPointer)));
 	
-	parseExprFromString(info.parseResult, state, origin, info.basePath, state.mem.exprs, *info.content);
+#ifdef UPDATE_USE_RELOCATION
+	nix::Exprs exprs;
+#else
+	nix::Exprs& exprs = state.mem.exprs;
+#endif
+	parseExprFromString(info.parseResult, state, origin, info.basePath, exprs, *info.content);
 	processParseResult(state, info);
 
 	return info;
@@ -154,7 +228,12 @@ void recursiveRewrite(RewriteState& state, SynRef sr){
 			
 			for(auto& updateBinding : *updateBindings){
 				if(a->attrs->contains(updateBinding.name)){
-					state.eval.forceValueDeep(*updateBinding.value);
+					try{
+						deeperForce(state.eval, *updateBinding.value);
+					}catch(nix::Error& e){
+						e.addTrace(state.eval.positions[updateBinding.pos], nix::HintFmt("while deep forcing update.%1%", state.eval.symbols[updateBinding.name]));
+						throw;
+					}
 
 					SubexpressionFrame frame;
 					SyntaxReference sr = syntax.getSubexpression(&frame, updateBinding.name);
@@ -211,11 +290,13 @@ void EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 
 	recursiveRewrite(rewrite, std::move(root));
 
-	std::sort(rewrite.rewrites.begin(),rewrite.rewrites.end());
+	std::vector<Rewrite> rwvec{std::from_range_t{},std::move(rewrite.rewrites)};
+
+	std::stable_sort(rwvec.begin(),rwvec.end());
 
 	uint32_t cursor = 0;
 
-	for(Rewrite& rw : rewrite.rewrites){
+	for(Rewrite& rw : rwvec){
 		out << string_view(*info.content).substr(cursor, rw.begin - cursor);
 		out << rw.replacement;
 		cursor = rw.end;

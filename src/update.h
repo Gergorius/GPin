@@ -1,8 +1,8 @@
+#pragma once
 
 #include "altparse.h"
 #include "greedy.h"
-#include "exprutil.h"
-#include "format.h"
+#include "treewalk.h"
 
 #include <boost/container_hash/hash.hpp>
 #include <boost/unordered/concurrent_flat_map_fwd.hpp>
@@ -35,7 +35,7 @@ struct SourceInfo{
 	std::shared_ptr<const std::string> content;
 	nix::RootValue value;
 	nix::SourcePath basePath;
-	SourceInfo(nix::SourcePath bp): basePath(bp){};
+	inline SourceInfo(nix::SourcePath bp): basePath(bp){};
 };
 
 struct EvalStateForUpdate : EvalState{
@@ -65,35 +65,6 @@ struct RecordedExprAttrs : nix::ExprAttrs{
 	RecordedExprAttrs(nix::ExprAttrs&& t): nix::ExprAttrs(std::move(t)){}
 	virtual void eval(EvalState &state, Env &env, Value &v) override;
 	virtual Value* maybeThunk(EvalState& state, Env& env) override;
-};
-
-struct ObtrusiveVisitor{
-	void subexpr(nix::Expr* e) const{
-		visitDynamicExpr(e, *this);
-	}
-	void operator()(nix::Expr*) const{
-		// TODO: We should error here.
-	}
-	void operator()(nix::ExprFloat*) const{}
-	void operator()(nix::ExprInt*) const{}
-	void operator()(nix::ExprString*) const{}
-	void operator()(nix::ExprVar*) const{}
-	void operator()(nix::ExprPath*) const{}
-	void operator()(nix::ExprInheritFrom*) const{}
-	void operator()(nix::ExprBlackHole*) const{}
-	// Lambda's subexpressions are left alone.
-	void operator()(nix::ExprLambda* expr) const{
-		obtrudeAsGreedy<nix::ExprLambda>(expr);
-	}
-	void operator()(nix::ExprAttrs* expr) const{
-		visitSubexprs(expr,[&](nix::Expr* expr){ this->subexpr(expr); });
-		obtrudeAsGreedy<nix::ExprAttrs,RecordedExprAttrs>(expr);
-	}
-	template<typename T>
-	void operator()(T* expr) const{
-		visitSubexprs(expr, [&](nix::Expr* expr){ this->subexpr(expr); });
-		obtrudeAsGreedy<T>(expr);
-	}
 };
 
 namespace{
