@@ -33,7 +33,7 @@ InternalType internalType(const nix::Value& v){
 #pragma clang diagnostic error "-Wswitch"
 #pragma clang diagnostic error "-Wimplicit-fallthrough"
 
-size_t NixValueComparer::hash(nix::Value* vptr){
+size_t NixValueComparer::hash(const nix::Value* vptr){
 	size_t sum = std::hash<nix::ValueType>{}(vptr->type()) * 31;
 	switch(internalType(*vptr)){
 		case nix::tInt:
@@ -87,14 +87,14 @@ size_t NixValueComparer::hash(nix::Value* vptr){
 	return sum;
 }
 
-bool NixValueComparer::eq(nix::Value* l,nix::Value* r){
-	using pair_type = std::pair<nix::Value*,nix::Value*>;
+bool NixValueComparer::eq(const nix::Value* l,const nix::Value* r){
+	using pair_type = std::pair<const nix::Value*,const nix::Value*>;
 
 	std::array<std::byte, 0x1000> buf;
 	std::pmr::monotonic_buffer_resource res{buf.data(),buf.size()};
 	std::pmr::unordered_set<pair_type,boost::hash<pair_type>> seen{&res};
 
-	return [&seen](this const auto & recurse,nix::Value* l,nix::Value* r){
+	return [&seen](this const auto & recurse,const nix::Value* l,const nix::Value* r){
 		if(l == r){
 			return true;
 		}
@@ -228,107 +228,118 @@ void deeperForce(nix::EvalState& state, nix::Value& value){
 	}(&value);
 }
 
-void deduplicateSubvalues(nix::EvalState& state, nix::Value*& value){
-	std::unordered_map<nix::Value*, nix::Value*, NixValueComparer, NixValueComparer, traceable_allocator<std::pair<nix::Value* const,nix::Value*>>> pool;
+std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* value){
 
-#define RT -> std::pair<nix::Value*,bool>
+	// return.first: Pointer to canonical value.
+	// return.second: Whether the canonical value is a PERFECT copy of the argument value. (Perfect means nix code cannot observe the difference.)
 
-	auto root = [&state,&pool](this const auto & recurse, nix::Value* value) RT{
+	const PoolPtr* p;
+	bool perfect;
+	{
+		auto [itr, inserted] = pool.emplace(value);
+		perfect = inserted;
+		p = &*itr;
+	}
 
-		// return.first: Pointer to canonical value.
-		// return.second: Whether the canonical value is a PERFECT copy of the argument value. (Perfect means nix code cannot observe the difference.)
+#define PREP_REPLACEMENT if(!perfect){ perfect = p->value == value; break; } p->value = state.allocValue(); (*p->value) = *value
 
-		nix::Value* p1;
-		nix::Value** p2;
-		bool inserted;
-		{
-			auto [itr, inserted0] = pool.insert({value, value});
-			inserted = inserted0;
-			p1 = itr->second;
-			p2 = &itr->second;
-		}
+#define REC(n,v) nix::Value* n; if(perfect){ std::tie(n,perfect) = recursiveIntern(v); }else{ n = recursiveIntern(v).first; }
 
-#define SC if(!inserted){ return {p1, p1 == value}; } *p2 = p1 = state.allocValue();
+	switch(internalType(*value)){
 
-		bool perfect = true;
+		// First we handle all values that have subvalues.
 
-#define REC(n,v) nix::Value* n; if(perfect){ std::tie(n,perfect) = recurse(v); }else{ n = recurse(v).first; }
+		case nix::tPrimOpApp:{
 
-		switch(internalType(*value)){
-			case nix::tPrimOpApp:{ SC;
-				REC(l,value->primOpApp().left);
-				REC(r,value->primOpApp().right);
-				if(perfect){
-					p1 = *p2 = value;
-				}
-				p1->mkPrimOpApp(l,r);
-			}break;
-			case nix::tApp:{ SC;
-				REC(l,value->app().left);
-				REC(r,value->app().right);
-				if(perfect){
-					p1 = *p2 = value;
-				}
-				p1->mkApp(l,r);
-			}break;
-			case nix::tListSmall:
-			case nix::tListN:{ SC;
-				nix::ListBuilder builder = state.buildList(value->listSize());
-				for(size_t i = 0;i < value->listSize();i++){
-					REC(v,value->listView()[i]);
-					builder.elems[i] = v;
-				}
-				if(perfect){
-					p1 = *p2 = value;
-				}
-				p1->mkList(builder);
-			}break;
-			case nix::tAttrs:{ SC;
-				nix::Bindings* newBindings = state.mem.allocBindings(value->attrs()->size());
-				newBindings->pos = value->attrs()->pos;
-				for(size_t i = 0;i < value->attrs()->size();i++){
-					const nix::Attr& a = (*value->attrs())[i];
-					(*newBindings)[i] = a;
-					REC(v,a.value);
-					(*newBindings)[i].value = v;
-				}
-				if(perfect){
-					p1 = *p2 = value;
-				}
-				p1->mkAttrs(newBindings);
-			}break;
+			PREP_REPLACEMENT;
 
-			// Deduplicating values that do not compare equal to themselves produces an observable side effect.
+			REC(l,value->primOpApp().left);
+			REC(r,value->primOpApp().right);
+
+			if(perfect){
+				p->value = value;
+			}
+			p->value->mkPrimOpApp(l, r);
+		}break;
+
+		case nix::tApp:{
+
+			PREP_REPLACEMENT;
+
+			REC(l,value->app().left);
+			REC(r,value->app().right);
+			if(perfect){
+				p->value = value;
+			}
+			p->value->mkApp(l, r);
+		}break;
+
+		case nix::tListSmall:
+		case nix::tListN:{
+
+			PREP_REPLACEMENT;
 			
-			case nix::tLambda:
-			case nix::tPrimOp:
-			case nix::tThunk:
-			case nix::tFailed:
-				perfect = p1 == value;
-				break;
-			case nix::tFloat:
-				perfect = p1 == value || !std::isnan(value->fpoint());
-				break;
-			
-			// The following values can be deduplicated just fine.
+			nix::ListBuilder builder = state.buildList(value->listSize());
+			for(size_t i = 0;i < value->listSize();i++){
+				REC(v,value->listView()[i]);
+				builder.elems[i] = v;
+			}
+			if(perfect){
+				p->value = value;
+			}
+			p->value->mkList(builder);
+		}break;
 
-			case nix::tInt:
-			case nix::tBool:
-			case nix::tNull:
-			case nix::tPath:
-			case nix::tString:
-			case nix::tExternal:
-				break;
-			
-			// The following values are errors.
+		case nix::tAttrs:{
 
-			case nix::tUninitialized:
-			case nix::tNumberOfInternalTypes:
-				state.error<nix::EvalError>("Bad value!").panic();
-				break;
-		}
-		return {p1, perfect};
-	}(value);
+			PREP_REPLACEMENT;
 
-	value = root.first;
+			nix::Bindings* newBindings = state.mem.allocBindings(value->attrs()->size());
+			newBindings->pos = value->attrs()->pos;
+			for(size_t i = 0;i < value->attrs()->size();i++){
+				nix::Attr a = (*value->attrs())[i];
+				REC(v, a.value);
+				a.value = v;
+				newBindings->push_back(a);
+			}
+			if(perfect){
+				p->value = value;
+			}
+			p->value->mkAttrs(newBindings);
+		}break;
+
+		// Deduplicating values that do not compare equal to themselves produces an observable side effect.
+		
+		case nix::tLambda:
+		case nix::tPrimOp:
+		case nix::tThunk:
+		case nix::tFailed:
+			perfect = p->value == value;
+			break;
+		case nix::tFloat:
+			perfect = p->value == value || !std::isnan(value->fpoint());
+			break;
+		
+		// The following values can be deduplicated just fine.
+
+		case nix::tInt:
+		case nix::tBool:
+		case nix::tNull:
+		case nix::tPath:
+		case nix::tString:
+		case nix::tExternal:
+			break;
+		
+		// The following values are errors.
+
+		case nix::tUninitialized:
+		case nix::tNumberOfInternalTypes:
+			state.error<nix::EvalError>("Bad value!").panic();
+			break;
+	}
+	return { p->value, perfect };
+}
+
+const nix::Value* NixValueInternPool::intern(nix::Value* value){
+	return recursiveIntern(value).first;
 }

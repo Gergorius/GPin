@@ -3,6 +3,7 @@
 #include "altparse.h"
 #include "greedy.h"
 #include "treewalk.h"
+#include "valueutil.h"
 
 #include <boost/container_hash/hash.hpp>
 #include <boost/unordered/concurrent_flat_map_fwd.hpp>
@@ -39,9 +40,16 @@ struct SourceInfo{
 };
 
 struct EvalStateForUpdate : EvalState{
+
+	// This pool is EXCLUSIVELY for deeperForce'd nix values. DO NOT intern a value that was not deeperForced. (See deeperForce in "valueutil.h")
+	NixValueInternPool pool = NixValueInternPool(*this);
+
 	using EvalState::EvalState;
 
+
 	nix::Symbol updateSymbol;
+
+	nix::RootValue autoArgument;
 
 	// A list of values that must be forceValue'd.
 	std::vector<nix::Value*, traceable_allocator<nix::Value*>> forceQueue;
@@ -66,12 +74,3 @@ struct RecordedExprAttrs : nix::ExprAttrs{
 	virtual void eval(EvalState &state, Env &env, Value &v) override;
 	virtual Value* maybeThunk(EvalState& state, Env& env) override;
 };
-
-namespace{
-	inline SyntaxReference& descendHelper(RecordedExprAttrs* a, SyntaxReference& sr){
-		return sr;
-	}
-	inline SyntaxReference descendHelper(RecordedExprAttrs* a, RawSyntaxReference& sr){
-		return sr.descendToIsolated(a);
-	}
-}
