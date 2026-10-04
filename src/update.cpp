@@ -9,6 +9,7 @@
 #include <boost/container_hash/hash.hpp>
 #include <functional>
 #include <memory>
+#include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-error.hh>
 #include <nix/expr/eval.hh>
 #include <nix/expr/nixexpr.hh>
@@ -20,8 +21,8 @@
 #include <nix/util/util.hh>
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include <ostream>
-#include <ranges>
 #include <string>
+#include <variant>
 #include <vector>
 
 EXPORT_PRIVATE_MEMBER(getImportResolutionCache, &nix::EvalState::importResolutionCache);
@@ -203,43 +204,38 @@ void EvalStateForUpdate::finishLoad(){
 	}
 }
 
+namespace{
+	SyntaxReference& descendHelper(RecordedExprAttrs* a, SyntaxReference& sr){
+		return sr;
+	}
+	SyntaxReference descendHelper(RecordedExprAttrs* a, RawSyntaxReference& sr){
+		return sr.descendToIsolated(a);
+	}
+}
+
 template<typename SynRef>
 void recursiveRewrite(RewriteState& state, SynRef sr){
 	constexpr bool raw = std::is_same_v<SynRef, RawSyntaxReference>;
 	if constexpr(!raw){
 		sr.tryIsolate();
 	}
-	EvalStateForUpdate& ext = static_cast<EvalStateForUpdate&>(state.eval);
+	EvalStateForUpdate& ext = static_cast<EvalStateForUpdate&>(state.eval());
 	if(auto a = dynamic_cast<RecordedExprAttrs*>(sr.expression)){
 
 		decltype(auto) syntax = descendHelper(a, sr);
 
-		auto itr = a->attrs->find(ext.updateSymbol);
 		const nix::Bindings* myBindings = (**ext.valueMap[a]).attrs();
 		const nix::Bindings* updateBindings = nullptr;
-		if(itr != a->attrs->end()){
-			// Must be a static attribute!
 
-			nix::Value& updater = *myBindings->get(ext.updateSymbol)->value;
+		const nix::Attr* updater = myBindings->get(ext.updateSymbol);
 
-			state.eval.forceAttrs(updater, itr->second.pos, "while evaluating updater");
+		if(updater != nullptr){
 
-			updateBindings = updater.attrs();
-			
-			for(auto& updateBinding : *updateBindings){
-				if(a->attrs->contains(updateBinding.name)){
-					try{
-						deeperForce(state.eval, *updateBinding.value);
-					}catch(nix::Error& e){
-						e.addTrace(state.eval.positions[updateBinding.pos], nix::HintFmt("while deep forcing update.%1%", state.eval.symbols[updateBinding.name]));
-						throw;
-					}
+			state.eval().forceAttrs(*updater->value, updater->pos, "while evaluating updater");
 
-					SubexpressionFrame frame;
-					SyntaxReference sr = syntax.getSubexpression(&frame, updateBinding.name);
-					generateRewrite(state, std::move(sr), *updateBinding.value);
-				}
-			}
+			updateBindings = updater->value->attrs();
+
+			generateUpdate(state, syntax, *updateBindings);
 		}
 		RawSyntaxReference rsr = syntax;
 
@@ -274,7 +270,7 @@ void recursiveRewrite(RewriteState& state, SynRef sr){
 
 void EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 	RewriteState rewrite{
-		.eval = *this,
+		.pool = this->pool,
 		.defaultIndent = "",
 		.source = *info.content,
 		.basePath = info.basePath
@@ -290,15 +286,15 @@ void EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 
 	recursiveRewrite(rewrite, std::move(root));
 
-	std::vector<Rewrite> rwvec{std::from_range_t{},std::move(rewrite.rewrites)};
+	std::vector<Rewrite>& rwvec = rewrite.rewrites;
 
-	std::stable_sort(rwvec.begin(),rwvec.end());
+	std::sort(rwvec.begin(),rwvec.end());
 
 	uint32_t cursor = 0;
 
 	for(Rewrite& rw : rwvec){
 		out << string_view(*info.content).substr(cursor, rw.begin - cursor);
-		out << rw.replacement;
+		out << rw;
 		cursor = rw.end;
 	}
 

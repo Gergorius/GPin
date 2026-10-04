@@ -7,11 +7,16 @@
 #include <cmath>
 #include <cstdint>
 #include <format>
+#include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-error.hh>
 #include <nix/expr/nixexpr.hh>
+#include <nix/expr/print.hh>
+#include <nix/expr/symbol-table.hh>
 #include <nix/expr/value.hh>
 #include <nix/util/source-accessor.hh>
 #include <nix/util/source-path.hh>
+#include <sstream>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -21,6 +26,86 @@
 
 using std::string;
 using std::string_view;
+
+struct FormatState{
+	RewriteLink* cursor;
+	string_view preindent;
+	string_view indent;
+	uint32_t indentRepeatCount = 0;
+public:
+	FormatState(){}
+	FormatState(Rewrite& t){
+		t.replacement.reset(cursor = new RewriteLink());
+	}
+	FormatState(FormatState&& that){
+		cursor = that.cursor;
+		preindent = that.preindent;
+		indent = that.indent;
+		indentRepeatCount = that.indentRepeatCount;
+		that.cursor = nullptr;
+	}
+	FormatState(const FormatState&) = delete;
+	FormatState& operator=(FormatState&& that){
+		this->~FormatState();
+		new (this) FormatState(std::move(that));
+		return *this;
+	}
+	FormatState& operator=(const FormatState&) = delete;
+private:
+	RewriteLink& push(){
+		RewriteLink* nl = new RewriteLink();
+		nl->next = std::move(cursor->next);
+		cursor->next.reset(nl);
+		cursor = nl;
+		return *nl;
+	}
+public:
+	FormatState split(RewriteState& rs){
+		FormatState temp;
+		temp.cursor = cursor;
+		temp.preindent = preindent;
+		temp.indent = indent;
+		temp.indentRepeatCount = indentRepeatCount;
+		push();
+		return temp;
+	}
+	FormatState& operator<<(string str){
+		if(str.empty()){ return *this; }
+		if(cursor->view().empty()){
+			cursor->data = std::move(str);
+			return *this;
+		}
+		if(std::holds_alternative<string>(cursor->data)){
+			std::string& s = std::get<string>(cursor->data);
+			if(s.size() + str.size() <= s.capacity()){
+				s += std::move(str);
+				return *this;
+			}
+		}
+		push().data = std::move(str);
+		return *this;
+	}
+	FormatState& operator<<(string_view view){
+		if(view.empty()){ return *this; }
+		if(cursor->view().empty()){
+			cursor->data = view;
+			return *this;
+		}
+		if(view.size() < 0x10 && std::holds_alternative<string>(cursor->data)){
+			std::string& s = std::get<string>(cursor->data);
+			if(s.size() + view.size() <= s.capacity()){
+				s += view;
+				return *this;
+			}
+		}
+		push().data = view;
+		return *this;
+	}
+	template<size_t N>
+	FormatState& operator<<(const char (&str)[N]){
+		return this->operator<<(string_view(str));
+	}
+};
 
 #define GET_ADI [](const auto& v) -> const AttrsDeclarationInfo&{ return v; }
 
@@ -82,7 +167,7 @@ std::pair<string_view,string_view> detectIndentation(string_view source){
 	}
 }
 
-std::pair<string_view,string_view> detectIndentation(RewriteState& state, uint32_t begin, uint32_t end){
+static std::pair<string_view,string_view> detectIndentation(RewriteState& state, uint32_t begin, uint32_t end){
 	using pos = string_view::size_type;
 	pos lineStart = state.source.substr(0, begin).find_last_of('\n');
 	lineStart = lineStart == string_view::npos ? 0 : lineStart + 1;
@@ -95,7 +180,7 @@ struct chart_info{
 	inline chart_info(): path(), strength(0){}
 };
 
-void chart(nix::Expr* expr, nix::Value* value, std::vector<nix::Symbol>& path, std::unordered_map<nix::Value*, chart_info>& paths){
+static void chart(nix::Expr* expr, nix::Value* value, std::vector<nix::Symbol>& path, std::unordered_map<nix::Value*, chart_info>& paths){
 	if(!path.empty()){
 		auto& info = paths[value];
 		int strength = expr == nullptr ? 1 : 2;
@@ -124,166 +209,177 @@ void chart(nix::Expr* expr, nix::Value* value, std::vector<nix::Symbol>& path, s
 	}
 }
 
-bool FormatState::newLine(){
-	if(indent.size() == 0){
+static FormatState addRewrite(RewriteState& rs,uint32_t begin,uint32_t end){
+	rs.rewrites.push_back({.begin = begin,.end = end});
+	FormatState fs(rs.rewrites.back());
+	std::tie(fs.preindent,fs.indent) = detectIndentation(rs, begin, end);
+	return std::move(fs);
+}
+
+static bool newLine(RewriteState& rs, FormatState& fs){
+	if(fs.indent.size() == 0){
 		return false; // No new lines.
 	}
-	output << '\n' << preindent;
-	for(int32_t i = 0;i < indentRepeatCount;i++){
-		output << indent;
+	fs << "\n" << fs.preindent;
+	for(int32_t i = 0;i < fs.indentRepeatCount;i++){
+		fs << fs.indent;
 	}
 	return true;
 }
 
-Rewrite FormatState::toRewrite() && {
-	return Rewrite{
-		.begin = begin,
-		.end = end,
-		.replacement = std::move(output).str()
-	};
+static void addBrackets(RewriteState& rs, FormatState& state){
+	state << "(";
+	FormatState temp = state.split(rs);
+	state << ")";
+	state = std::move(temp);
 }
 
-void formatValue(FormatState& state, nix::Value& value);
+#define STREAM(os,code) [&]() -> std::string{ std::ostringstream os; code; return std::move(os).str(); }()
 
-void formatBinding(FormatState& state, const nix::Attr& attr){
-	state.newLine();
-	nix::printIdentifier(state.output, state.eval.symbols[attr.name]);
-	state.output << " = ";
-	state.atomic = false;
-	formatValue(state, *attr.value);
-	state.output << ";";
+template<bool atomic>
+static void formatValue(RewriteState& rs, FormatState state, const nix::Value& value);
+
+static void formatBinding(RewriteState& rs, FormatState state, const nix::Attr& attr){
+	newLine(rs, state);
+
+	state << STREAM(os,nix::printAttributeName(os, rs.eval().symbols[attr.name]));
+	state << " = ";
+
+	formatValue<false>(rs, state.split(rs), *attr.value);
+	state << ";";
 }
 
-void formatValue(FormatState& state, nix::Value& value){
+template<bool atomic>
+static void formatValue(RewriteState& rs, FormatState state, const nix::Value& value){
 begin:
 	switch(internalType(value)){
-		case nix::tInt:
 		case nix::tBool:
-		case nix::tString: // Indented strings are bugged and fix folk refuse to nix them so we will not use them.
-		case nix::tNull:
-			value.print(state.eval, state.output);
+			if(value.boolean()){
+				state << "true";
+			}else{
+				state << "false";
+			}
 			break;
-		
+		case nix::tString:
+			state << STREAM(os,nix::printLiteralString(os, value.string_view()));
+			break;
+		case nix::tNull:
+			state << "null";
+			break;
 		case nix::tPath:{
 			nix::SourcePath sp = value.path();
-			if(sp.accessor == state.basePath.accessor){
-				const std::string& base = state.basePath.path.abs();
+			if(sp.accessor == rs.basePath.accessor){
+				const std::string& base = rs.basePath.path.abs();
 				const std::string& subp = sp.path.abs();
 				if(subp.starts_with(base)){
-					state.output << "." << subp.substr(base.size());
+					state << "." << std::move(subp).substr(base.size());
 				}else{
-					state.output << sp.to_string();
+					state << sp.to_string();
 				}
 			}else{
-				state.output << sp.to_string();
+				state << sp.to_string();
 			}
 		}break;
+
+		case nix::tInt:
+			if(atomic && value.integer().value < 0) addBrackets(rs, state);
+			state << std::to_string(value.integer().value);
+
+			break;
 		
 		case nix::tFloat:{
 			// Why is this so complicated?
 			auto f = value.fpoint();
-			bool brackets = (f < 0.0 || std::isnan(f) || std::isinf(f)) && state.atomic;
-			if(brackets){
-				state.output << "(";
-			}
+			if(atomic && (f < 0.0 || std::isnan(f) || std::isinf(f))) addBrackets(rs, state);
 			if(std::isnan(f)){
-				state.output << "1.e308*2*0";
+				state << "1.e308*2*0";
 			}else if(std::isinf(f)){
 				if(std::signbit(f)){
-					state.output << "-1.e308*2";
+					state << "-1.e308*2";
 				}else{
-					state.output << "1.e308*2";
+					state << "1.e308*2";
 				}
 			}else{
-				std::print(state.output, "{:-#}", f);
-			}
-			if(brackets){
-				state.output << ")";
+				state << std::format("{:-#}", f);
 			}
 		}break;
 		
 		case nix::tAttrs:{
 			const nix::Bindings& bindings = *value.attrs();
 			if(bindings.size() == 0){
-				state.output << "{}";
+				state << "{}";
 				break;
 			}
-			state.output << "{";
+			state << "{";
+
 			state.indentRepeatCount++;
 			for(auto& binding : bindings){
-				formatBinding(state, binding);
+				formatBinding(rs, state.split(rs), binding);
 			}
+
 			state.indentRepeatCount--;
-			state.newLine();
-			state.output << "}";
+			newLine(rs,state);
+			state << "}";
 		}break;
 		
 		case nix::tListN:
 		case nix::tListSmall:{
 			nix::ListView list = value.listView();
 			if(list.size() == 0){
-				state.output << "[]";
+				state << "[]";
 				break;
 			}
-			state.output << "[";
+			state << "[";
+
 			state.indentRepeatCount++;
 			bool notFirst = false;
 			for(auto& val : list){
-				if(!state.newLine() && notFirst){
-					state.output << " ";
+				if(!newLine(rs, state) && notFirst){
+					state << " ";
 				}
-				state.atomic = true;
-				formatValue(state, *val);
+				formatValue<true>(rs, state.split(rs), *val);
 				notFirst = true;
 			}
+
 			state.indentRepeatCount--;
-			state.newLine();
-			state.output << "]";
+			newLine(rs, state);
+			state << "]";
 		}break;
 
 		case nix::tPrimOp:{
-			const nix::Value& btin = state.eval.getBuiltins();
+			const nix::Value& btin = rs.eval().getBuiltins();
 			for(auto& attr : *btin.attrs()){
 				if(NixValueComparer::eq(&value, attr.value)){
-					state.output << "builtins.";
-					nix::printIdentifier(state.output, state.eval.symbols[attr.name]);
+					state << "builtins." << STREAM(os, nix::printAttributeName(os, rs.eval().symbols[attr.name]));
 					return;
 				}
 			}
-			state.eval.error<nix::EvalError>("Could not resolve primitive operator %1%", value.primOp()->name).debugThrow();
+			rs.eval().error<nix::EvalError>("Could not resolve primitive operator %1%", value.primOp()->name).debugThrow();
 		}break;
 		
 		case nix::tPrimOpApp:{
-			bool brackets = state.atomic;
-			if(brackets){
-				state.output << "(";
-			}
-			state.atomic = false;
-			formatValue(state, *value.primOpApp().left);
-			state.output << " ";
-			state.atomic = true;
-			formatValue(state, *value.primOpApp().right);
-			if(brackets){
-				state.output << ")";
-			}
+			if(atomic) addBrackets(rs, state);
+			formatValue<false>(rs, state.split(rs), *value.primOpApp().left);
+			state << " ";
+			formatValue<true>(rs, std::move(state), *value.primOpApp().right);
 		}break;
 		
 		case nix::tThunk:
 		case nix::tUninitialized:
 		case nix::tApp:
-			state.eval.error<nix::EvalError>("unexpected value").panic();
+			rs.eval().error<nix::EvalError>("unexpected value").panic();
 			break;
 		case nix::tExternal:
 		case nix::tFailed:
 		case nix::tLambda:
 		case nix::tNumberOfInternalTypes:
-			state.eval.error<nix::EvalError>("cannot serialize value").debugThrow();
+			rs.eval().error<nix::EvalError>("cannot serialize value").debugThrow();
 			break;
 			break;
 	}
 }
 
-void eraseDeclaration(RewriteState& state, const AttrsDeclarationInfo& info){
+static void eraseDeclaration(RewriteState& state, const AttrsDeclarationInfo& info){
 	uint32_t endpos = info.endsemi->end;
 	if(state.source[endpos] == '\n'){
 		endpos++;
@@ -291,23 +387,22 @@ void eraseDeclaration(RewriteState& state, const AttrsDeclarationInfo& info){
 			endpos++;
 		}
 	}
-	state.addRewrite(Rewrite{
+	state.rewrites.push_back(Rewrite{
 		.begin = info.begin->begin,
 		.end = endpos,
-		.replacement = ""
 	});
 }
 
 // Erase a non-isolated expression.
-void eraseNonIsolated(RewriteState& state, SyntaxReference expr){
-	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
+static void eraseNonIsolated(RewriteState& state, SyntaxReference expr){
+	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval());
 
 	for(uint32_t i = 0;i < decvec.size();i++){
 		eraseDeclaration(state, std::visit(GET_ADI,decvec[i]));
 	}
 }
 
-void eraseDynamicAndInheritAttrs(RewriteState& state, SyntaxReference& expr){
+static void eraseDynamicAndInheritAttrs(RewriteState& state, SyntaxReference& expr){
 	std::unordered_set<uint32_t> positions;
 	for(auto& exp : expr.attrs()->attrs.value()){
 		if(exp.second.chooseByKind(false, true, true)){
@@ -320,7 +415,7 @@ void eraseDynamicAndInheritAttrs(RewriteState& state, SyntaxReference& expr){
 	if(positions.empty()){
 		return;
 	}
-	auto result = expr.findMemberDeclarationsContaining(state.eval, positions);
+	auto result = expr.findMemberDeclarationsContaining(state.eval(), positions);
 	for(const auto& r : result){
 		eraseDeclaration(state, std::visit(GET_ADI,r));
 	}
@@ -328,7 +423,7 @@ void eraseDynamicAndInheritAttrs(RewriteState& state, SyntaxReference& expr){
 
 // Find or create the body of the attribute set represented by the specified expression.
 template<bool mustExist = false>
-std::conditional_t<mustExist,void,uint32_t> findOrDeclareAttributeSet(RewriteState& rs, FormatState& state, const SyntaxReference& expr){
+static FormatState findOrDeclareAttributeSet(RewriteState& rs, std::conditional_t<mustExist,SyntaxReference,const SyntaxReference&> expr){
 	std::span<const NixToken> boundary;
 	const NixToken* cursor;
 	if(expr.isIsolated()){
@@ -337,75 +432,71 @@ std::conditional_t<mustExist,void,uint32_t> findOrDeclareAttributeSet(RewriteSta
 		goto walkToBegin;
 	}
 	{
-		std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
+		std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(rs.eval());
 		for(uint32_t i = 0;i < decvec.size();i++){
 			BindingInfo& info = std::get<BindingInfo>(decvec[i]);
 			if(info.doteq->type == '='){
 				boundary = { info.begin, info.endsemi };
-				cursor = info.doteq;
+				cursor = info.doteq + 1;
 				goto walkToBegin;
 			}
 		}
 		if constexpr(mustExist){
-			rs.eval.error<nix::EvalError>("expected to find an attribute set").panic();
-			return;
+			rs.eval().error<nix::EvalError>("expected to find an attribute set").panic();
+			return FormatState{};
 		}else{
-			const SyntaxReference parent = expr.getParent();
-			uint32_t depth = findOrDeclareAttributeSet(rs, state, parent);
-			state.newLine();
-			nix::printIdentifier(state.output, state.eval.symbols[expr.path->name.symbol]);
-			state.output << " = {";
-			return depth + 1;
+			FormatState fs = findOrDeclareAttributeSet(rs, expr.getParent());
+
+			formatIdentifier(rs, fs, expr.path->name.symbol);
+			fs << " = {";
+
+			FormatState body = fs.split(rs);
+
+			newLine(rs, fs);
+			fs << "};";
+
+			body.indentRepeatCount++;
+
+			return std::move(body);
 		}
 	}
 walkToBegin:
-	std::tie(state.preindent,state.indent) = detectIndentation(rs, boundary[0].begin, boundary[boundary.size() - 1].end);
 	while(cursor->type != '{'){
 		cursor++;
 	}
-	state.atomic = true;
-	state.indentRepeatCount = 1;
-	state.begin = cursor->end;
-	state.end = cursor->end;
-	if constexpr(!mustExist) return 0;
+	FormatState fs = addRewrite(rs, cursor->end, cursor->end);
+	std::tie(fs.preindent,fs.indent) = detectIndentation(rs, boundary[0].begin, boundary[boundary.size() - 1].end);
+	fs.indentRepeatCount = 1;
+	return std::move(fs);
 }
 
-// Prepare for completely rewriting the non-isolated expression. If it does not exist, declare an attribute for it. If it exists, isolate it by emitting rewrites. The caller must remember to add the ending semicolon.
-void findOrDeclareAttribute(RewriteState& rs, FormatState& state, SyntaxReference expr){
+// Prepare for completely rewriting the non-isolated expression. If it does not exist, declare an attribute for it.
+static FormatState findOrDeclareAttribute(RewriteState& rs, SyntaxReference expr){
 
-	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval);
+	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(rs.eval());
 
 	uint32_t i = 0;
 
+	FormatState fs;
+
 	if(decvec.empty() || expr.isInherit()){ // Inherit just won't do for us.
-		const SyntaxReference parent = expr.getParent();
+		FormatState dec = findOrDeclareAttributeSet<true>(rs, expr.getParent());
 
-		findOrDeclareAttributeSet<true>(rs, state, parent);
-
-		state.newLine();
-		nix::printIdentifier(state.output, state.eval.symbols[expr.path->name.symbol]);
-		state.output << " = ";
+		newLine(rs, dec);
+		dec << STREAM(os,nix::printAttributeName(os, rs.eval().symbols[expr.path->name.symbol])) << " = ";
+		fs = dec.split(rs);
+		dec << ";";
 	}else{
 		const BindingInfo& info = std::get<BindingInfo>(decvec[i++]);
 
 		if(info.doteq->type != '='){
-			BindingInfo si = info.next();
-			while(si.doteq->type == '.'){
-				si = si.next();
-			}
-			rs.addRewrite(Rewrite{
-				.begin = info.doteq->begin,
-				.end = (si.doteq - 1)->end,
-				.replacement = ""
-			});
-			state.begin = si.doteq[1].begin;
+			fs = addRewrite(rs, info.doteq->begin, info.endsemi->begin);
+			fs << "=";
 		}else{
-			state.begin = info.doteq[1].begin;
+			fs = addRewrite(rs, info.doteq[1].begin, info.endsemi->begin);
 		}
-		state.end = info.endsemi->end;
 
-		std::tie(state.preindent, state.indent) = detectIndentation(rs, state.begin, state.end);
-
+		std::tie(fs.preindent, fs.indent) = detectIndentation(rs, info.doteq->begin, info.endsemi->begin);
 	}
 
 	while(i < decvec.size()){
@@ -418,26 +509,25 @@ void findOrDeclareAttribute(RewriteState& rs, FormatState& state, SyntaxReferenc
 			const NixToken* begin = expr.binarySearchPos(expr.expression->getPos());
 			const NixToken* end = begin;
 			maybeWalkToClosingToken(end);
-			rs.addRewrite({
+			rs.rewrites.push_back({
 				.begin = (begin - 1)->end, // ...politely.
 				.end = end->end,
-				.replacement = ""
 			});
 		}
 	}
+
+	return std::move(fs);
 }
 
-void finishAttributeSetDeclaration(FormatState& state, uint32_t depth){
-	for(uint32_t d = 0;d < depth;d++){
-		state.indentRepeatCount--;
-		state.newLine();
-		state.output << "}";
+static FormatState replaceSyntax(RewriteState& rs, SyntaxReference expr){
+	if(expr.tryIsolate()){
+		return addRewrite(rs, expr.beginOffset(), expr.endOffset());
+	}else{
+		return findOrDeclareAttribute(rs, std::move(expr));
 	}
 }
 
-void generateRewrite(RewriteState& state, SyntaxReference expr, nix::Value& value){
-	// Assume value is deep forced.
-
+static void generateRewrite(RewriteState& state, SyntaxReference expr, const nix::Value& value){
 	if(value.type() == nix::nAttrs){
 		const nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(expr.expression);
 		if(!attrs){
@@ -447,6 +537,7 @@ void generateRewrite(RewriteState& state, SyntaxReference expr, nix::Value& valu
 		if(bindings.empty()){
 			goto defaultRewrite;
 		}
+
 		eraseDynamicAndInheritAttrs(state, expr);
 		for(auto& attrDef : attrs->attrs.value()){
 			if(bindings.get(attrDef.first) == nullptr && attrDef.second.chooseByKind(true, false, false)){
@@ -459,7 +550,6 @@ void generateRewrite(RewriteState& state, SyntaxReference expr, nix::Value& valu
 		for(auto& binding : bindings){
 			if(attrs->attrs->contains(binding.name)){
 				SubexpressionFrame frame;
-				AttrPathNode pn;
 				generateRewrite(state, expr.getSubexpression(&frame, binding.name), *binding.value);
 			}else{
 				hasNewBindings = true;
@@ -467,132 +557,36 @@ void generateRewrite(RewriteState& state, SyntaxReference expr, nix::Value& valu
 		}
 
 		if(hasNewBindings){
-			FormatState f{
-				.eval = state.eval,
-				.basePath = state.basePath
-			};
-
-			uint32_t depth = findOrDeclareAttributeSet(state, f, expr);
+			FormatState f = findOrDeclareAttributeSet<true>(state, std::move(expr));
 
 			for(auto& binding : bindings){
 				if(!attrs->attrs->contains(binding.name)){
-					formatBinding(f, binding);
+					formatBinding(state, f.split(state), binding);
 				}
 			}
-
-			finishAttributeSetDeclaration(f, depth);
-
-			state.addRewrite(std::move(f).toRewrite());
 		}
 		return;
 	}
 
 defaultRewrite:
-	using pos = string_view::size_type;
 
-	FormatState f{
-		.eval = state.eval,
-		.basePath = state.basePath
-	};
-
-	bool endSemi = false;
-
-	if(expr.tryIsolate()){
-		f.begin = expr.beginOffset();
-		f.end = expr.endOffset();
-		std::tie(f.preindent, f.indent) = detectIndentation(state, f.begin, f.end);
-	}else{
-		findOrDeclareAttribute(state, f, std::move(expr));
-		endSemi = true;
-	}
-
-	std::ostringstream stream;
-
-	formatValue(f, value);
-
-	if(endSemi){
-		f.output << ";";
-	}
-
-	state.addRewrite(std::move(f).toRewrite());
+	formatValue<false>(state, replaceSyntax(state, std::move(expr)), value);
 }
 
-/*
-struct rec_info{
-	uint32_t depthEntered;
-	bool recursive;
-	bool exited;
-	rec_info() : depthEntered(0xFFFFFFFF), recursive(false), exited(false){}
-};
+void generateUpdate(RewriteState& state, SyntaxReference& expr, const nix::Bindings& bindings){
+	nix::ExprAttrs* a = expr.attrs();
 
-struct nix_value_hash{
-	inline size_t operator()(const nix::Value* v) const{
-		size_t acc = v->type();
-		switch(v->type()){
-			case nix::nThunk:
-			case nix::nFailed:
-				return acc;
-			case nix::nInt:
-				return acc ^ std::hash<nix::NixInt::Inner>{}(v->integer().value);
-			case nix::nFloat:
-				return acc ^ std::hash<nix::NixFloat>{}(v->fpoint());
-			case nix::nBool:
-				return acc ^ std::hash<bool>{}(v->boolean());
-			case nix::nString:
-				return acc ^ std::hash<string_view>{}(v->string_view());
-			case nix::nPath:
-				return acc ^ std::hash<string_view>{}(v->pathStrView());
-			case nix::nNull:
-				return acc;
-			case nix::nAttrs:
-				for(auto& binding : *v->attrs()){
-					acc = acc ^ (binding.name.getId() * 31 + binding.value->type());
-				}
-				return acc;
-			case nix::nList:
-				for(auto& value : v->listView()){
-					acc = acc * 31 + value->type();
-				}
-				return acc;
-			case nix::nFunction:
-				return acc;
-			case nix::nExternal:
-				return acc;
+	std::vector<std::pair<nix::Symbol,const nix::Value*>> attrs;
+
+	for(auto& updateBinding : bindings){
+		if(a->attrs->contains(updateBinding.name)){
+			deeperForce(state.eval(), *updateBinding.value);
+			attrs.push_back({updateBinding.name,state.pool.intern(updateBinding.value)});
 		}
-     }
-};
-
-inline uint32_t detectRecursiveValues(std::unordered_map<nix::Value*, rec_info>& seen,uint32_t depth,nix::Value* value){
-	uint32_t minDepth = 0xFFFFFFFF;
-	auto vtype = value->type();
-	if(vtype == nix::nAttrs || vtype == nix::nList){
-		rec_info& info = seen[value];
-
-		if(info.exited){
-			return 0xFFFFFFFF;
-		}
-
-		if(info.depthEntered != 0xFFFFFFFF){
-			return info.depthEntered;
-		}
-		info.depthEntered = depth;
-
-		if(vtype == nix::nAttrs){
-			for(auto& b : *value->attrs()){
-				minDepth = std::min(minDepth,detectRecursiveValues(seen, depth + 1, b.value));
-			}
-		}else{
-			for(auto& v : value->listView()){
-				minDepth = std::min(minDepth,detectRecursiveValues(seen, depth + 1, v));
-			}
-		}
-
-		info.depthEntered = 0xFFFFFFFF;
-		if(minDepth <= depth){
-			info.recursive = true;
-		}
-		info.exited = true;
 	}
-	return minDepth;
+
+	for(auto [name, value] : attrs){
+		SubexpressionFrame frame;
+		generateRewrite(state, expr.getSubexpression(&frame,name), *value);
+	}
 }
-*/
