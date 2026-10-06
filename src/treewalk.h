@@ -10,7 +10,6 @@
 
 #include <nix/expr/nixexpr.hh>
 #include <nix/util/pos-table.hh>
-#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -53,11 +52,12 @@ struct AttrsDeclarationInfo{
 };
 
 struct InheritInfo : AttrsDeclarationInfo{
-
+	const NixToken* getAttrsBegin(){ return begin + 1; }
 };
 
 struct InheritFromInfo : AttrsDeclarationInfo{
 	const NixToken *attrsBegin;
+	const NixToken* getAttrsBegin(){ return attrsBegin; }
 };
 
 struct BindingInfo : AttrsDeclarationInfo{
@@ -97,6 +97,8 @@ struct RawSyntaxReference{
 	inline uint32_t endOffset() const{
 		return boundary[boundary.size() - 1].end;
 	}
+	// If this is an ExprAttrs or ExprLet, returns the attributes. Otherwise returns nullptr.
+	nix::ExprAttrs* attrs() const;
 	// Create a syntax reference to a descendant expression ASSUMING it is an isolated attribute set.
 	SyntaxReference descendToIsolated(nix::ExprAttrs* attrs);
 	// Create a syntax reference to a descendant expression ASSUMING it is a non-empty let expression.
@@ -136,20 +138,68 @@ struct SyntaxReference : RawSyntaxReference{
 	}
 	// Is this syntax reference an inherit selector?
 	inline bool isInherit() const{
-		return path != nullptr && path->name.symbol && path->getAttrs()->attrs.value()[path->name.symbol].chooseByKind(false, true, true);
+		return expression != nullptr && path != nullptr && path->name.symbol && path->getAttrs()->attrs.value().at(path->name.symbol).chooseByKind(false, true, true);
 	}
 	// Are we the only definition inside a dynamic attribute value?
 	bool isOnlyDefinitionInDynamic() const;
 	bool tryIsolate();
-	// If this is an ExprAttrs or ExprLet, returns the attributes. Otherwise returns nullptr.
-	nix::ExprAttrs* attrs();
 	// Returns the body ASSUMING this is an isolated ExprLet or ExprWith.
 	SyntaxReference getBody();
 	// Get a reference to a subexpression of this ExprAttrs or ExprLet which may not be dynamic.
 	SyntaxReference getSubexpression(SubexpressionFrame* frame,nix::Symbol name);
 	SyntaxReference getDynamicSubexpression(SubexpressionFrame* frame,uint32_t index);
 	// Find all member declarations that contain at least one position from a set of positions.
-	std::vector<AttributeDeclaration> findMemberDeclarationsContaining(nix::EvalState& state,const std::unordered_set<uint32_t>& positions) const;
+	std::vector<AttributeDeclaration> findMemberDeclarationsContaining(nix::EvalState& state,const std::set<uint32_t>& positions) const;
 	// Find every place where this non-isolated value is declared! MAY miss empty declarations.
 	std::vector<AttributeDeclaration> findAllDeclarations(nix::EvalState& state) const;
 };
+
+
+template<typename Visitor>
+inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const Visitor& visit){
+	uint32_t index = 0;
+	const NixToken* cursor = boundary.data();
+	while(cursor->type != '{' && cursor->type != NixToken::kind_type::LET){
+		cursor++;
+	}
+	cursor++;
+	while(cursor->type != '}' && cursor->type != NixToken::kind_type::IN_KW){
+		const NixToken* begin = cursor;
+		if(cursor->type == NixToken::kind_type::INHERIT){
+			cursor++;
+			if(maybeWalkToClosingToken(cursor)){ // Is this inherit-from?
+				cursor++;
+				const NixToken* attrsBegin = cursor;
+				walkToToken(cursor, ';');
+				if(visit(index,InheritFromInfo{
+					AttrsDeclarationInfo{begin, cursor},
+					attrsBegin,
+				})){
+					return true;
+				}
+				cursor++;
+			}else{
+				walkToToken(cursor, ';');
+				if(visit(index,InheritInfo{
+					AttrsDeclarationInfo{begin,cursor},
+				})){
+					return true;
+				}
+				cursor++;
+			}
+		}else{
+			walkToToken(cursor, '=','.');
+			const NixToken* doteq = cursor;
+			walkToToken(cursor,';');
+			if(visit(index,BindingInfo{
+				AttrsDeclarationInfo{begin, cursor},
+				begin,
+				doteq
+			})){
+				return true;
+			}
+			cursor++;
+		}
+	}
+	return false;
+}

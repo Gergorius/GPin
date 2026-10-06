@@ -3,7 +3,7 @@
 #include "exprutil.h"
 #include "steal.h"
 #include "altparse.h"
-#include "valueutil.h"
+#include "treewalk.h"
 #include "format.h"
 
 #include <boost/container_hash/hash.hpp>
@@ -22,7 +22,6 @@
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include <ostream>
 #include <string>
-#include <variant>
 #include <vector>
 
 EXPORT_PRIVATE_MEMBER(getImportResolutionCache, &nix::EvalState::importResolutionCache);
@@ -79,18 +78,21 @@ Value* RecordedExprAttrs::maybeThunk(EvalState& state, Env& env){
 
 // #define UPDATE_USE_RELOCATION // Do not. The implementation for this is incomplete. WILL crash.
 
+#define RF return false
+
 struct RelocatingVisitor{
 #ifdef UPDATE_USE_RELOCATION
 	nix::Exprs& exprs;
 	RelocatingVisitor(nix::Exprs& e): exprs(e){}
-	void operator()(nix::Expr*) const{}
+	bool operator()(nix::Expr*) const{ RF; }
 	template<typename T>
-	void operator()(T* expr) const{
+	bool operator()(T* expr) const{
 		expr = exprs.add<T>(std::move(*expr));
-		visitSubexprs(expr,[&](nix::Expr* expr){ visitDynamicExpr(expr, *this); });
+		visitSubexprs(expr,[&](nix::Expr* expr){ visitDynamicExpr(expr, *this); RF; });
+		RF;
 	}
 #else
-	void operator()(nix::Expr*) const{}
+	bool operator()(nix::Expr*) const{ RF; }
 	RelocatingVisitor(nix::Exprs& e){}
 #endif
 };
@@ -100,7 +102,7 @@ struct ObtrusiveVisitor : private RelocatingVisitor{
 	const RelocatingVisitor& rv() const{
 		return *this;
 	}
-	void operator()(nix::Expr* expr) const{ rv()(expr); }
+	bool operator()(nix::Expr* expr) const{ rv()(expr); RF; }
 	template<typename T> struct replacement{ using type = Greedy<T>; };
 	template<> struct replacement<nix::ExprAttrs>{ using type = RecordedExprAttrs; };
 #define SELF_REPLACE(name) template<> struct replacement<nix::name>{ using type = nix::name; }
@@ -113,18 +115,20 @@ struct ObtrusiveVisitor : private RelocatingVisitor{
 	SELF_REPLACE(ExprInheritFrom);
 	SELF_REPLACE(ExprBlackHole);
 	template<typename T>
-	void operator()(T* op) const{
+	bool operator()(T*& op) const{
 		using TR = typename replacement<T>::type;
 #ifdef UPDATE_USE_RELOCATION
-		TR* ap = rv.exprs.add<TR>(std::move(*op));
+		TR* ap = rv().exprs.add<TR>(std::move(*op));
+		op = ap;
 #else
 		TR* ap = obtrudeAsGreedy<T,TR>(op);
 #endif
 		if constexpr(std::is_same_v<T, nix::ExprLambda>){
-			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicExpr(expr, rv()); });
+			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicExpr(expr, rv()); RF; });
 		}else{
-			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicExpr(expr, *this); });
+			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicExpr(expr, *this); RF; });
 		}
+		RF;
 	}
 };
 
@@ -143,7 +147,7 @@ const SourceInfo& loadFileImpl(EvalStateForUpdate& state, const nix::SourcePath&
 	auto resolvedPath = nix::getConcurrent(importResolutionCache, path);
 
 	if(!resolvedPath) {
-		resolvedPath = resolveExprPath(path);
+		resolvedPath = nix::resolveExprPath(path);
 		importResolutionCache.emplace(path, *resolvedPath);
 	}
 
@@ -159,11 +163,8 @@ const SourceInfo& loadFileImpl(EvalStateForUpdate& state, const nix::SourcePath&
 	info.content = std::make_shared<std::string>(file.readFile());
 
     nix::Pos::Origin origin = file;
-#ifdef UPDATE_USE_RELOCATION
-	nix::Exprs exprs;
-#else
 	nix::Exprs& exprs = state.mem.exprs;
-#endif
+
 	parseExprFromString(info.parseResult, state, origin, info.basePath, exprs, *info.content);
 	fileEvalCache.emplace(file,processParseResult(state, info));
 	return info;
@@ -213,62 +214,142 @@ namespace{
 	}
 }
 
-template<typename SynRef>
-void recursiveRewrite(RewriteState& state, SynRef sr){
-	constexpr bool raw = std::is_same_v<SynRef, RawSyntaxReference>;
-	if constexpr(!raw){
-		sr.tryIsolate();
+// Rewrite for when the SyntaxReference is isolated.
+static void isolatedRewrite(RewriteState& state, SyntaxReference sr);
+// Rewrite for when the SyntaxReference is NOT isolated.
+static bool possiblyNonIsolatedRewrite(RewriteState& state, SyntaxReference sr, AnchorSet& anchors);
+// Rewrite the attributes only! May or may not be isolated. This also handles the updates.
+static bool rewriteMemberAttrs(RewriteState& state, SyntaxReference& sr, AnchorSet& anchors);
+// We have a vague idea where we are. Descend until we find an expression that contains enough information for us to find our bearings. Returns the position of the first successfully isolated expression.
+static uint32_t detachedRewrite(RewriteState& state, RawSyntaxReference rsr){
+	if(auto* ptr = dynamic_cast<RecordedExprAttrs*>(rsr.expression)){
+		SyntaxReference sr = rsr.descendToIsolated(ptr);
+		uint32_t begin = sr.beginOffset();
+		isolatedRewrite(state, std::move(sr));
+		return begin;
+	}else if(auto* ptr = dynamic_cast<nix::ExprLet*>(rsr.expression)){
+		if(!ptr->attrs->attrs->empty()){
+			SyntaxReference sr = rsr.descendToIsolated(ptr);
+			uint32_t begin = sr.beginOffset();
+			isolatedRewrite(state, std::move(sr));
+			return begin;
+		}
 	}
-	EvalStateForUpdate& ext = static_cast<EvalStateForUpdate&>(state.eval());
-	if(auto a = dynamic_cast<RecordedExprAttrs*>(sr.expression)){
+	uint32_t acc = 0xFFFFFFFFu;
+	visitDynamicExpr(rsr.expression, mkSubexprs([&](nix::Expr* ex){
+		RawSyntaxReference rsr2 = rsr;
+		rsr2.expression = ex;
+		acc = std::min(detachedRewrite(state, rsr2), acc);
+		RF;
+	}));
+	return acc;
+}
 
-		decltype(auto) syntax = descendHelper(a, sr);
-
-		const nix::Bindings* myBindings = (**ext.valueMap[a]).attrs();
-		const nix::Bindings* updateBindings = nullptr;
-
-		const nix::Attr* updater = myBindings->get(ext.updateSymbol);
-
-		if(updater != nullptr){
-
-			state.eval().forceAttrs(*updater->value, updater->pos, "while evaluating updater");
-
-			updateBindings = updater->value->attrs();
-
-			generateUpdate(state, syntax, *updateBindings);
+static void isolatedRewrite(RewriteState& state, SyntaxReference sr){
+	if(nix::ExprAttrs* attrs = sr.attrs()){
+		AnchorSet anchors;
+		if(rewriteMemberAttrs(state, sr, anchors)){
+			generateNegativeRewrites(state, std::move(sr), anchors);
 		}
-		RawSyntaxReference rsr = syntax;
-
-		if(a->inheritFromExprs){
-			for(auto& def : *a->inheritFromExprs.get()){
-				rsr.expression = def;
-				recursiveRewrite(state, rsr);
-			}
-		}
-		for(auto& def : a->attrs.value()){
-			// For obvious reasons we ignore bindings that are being updated.
-			if(updateBindings == nullptr || updateBindings->get(def.first) == nullptr){
-				SubexpressionFrame frame;
-				recursiveRewrite(state, syntax.getSubexpression(&frame, def.first));
-			}
-		}
-		for(uint32_t i = 0;i < a->dynamicAttrs->size();i++){
-			rsr.expression = a->dynamicAttrs->at(i).nameExpr;
-			recursiveRewrite(state, rsr);
-			
-			SubexpressionFrame frame;
-			recursiveRewrite(state, syntax.getDynamicSubexpression(&frame, i));
+		if(dynamic_cast<nix::ExprLet*>(sr.expression)){
+			isolatedRewrite(state, sr.getBody());
 		}
 	}else{
 		visitDynamicExpr(sr.expression, mkSubexprs([&](nix::Expr* ex){
-			RawSyntaxReference rsr = sr;
-			rsr.expression = ex;
-			recursiveRewrite(state, rsr);
+			RawSyntaxReference rsr2 = sr;
+			rsr2.expression = ex;
+			detachedRewrite(state, rsr2);
+			RF;
 		}));
 	}
 }
 
-void EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
+static bool possiblyNonIsolatedRewrite(RewriteState& state, SyntaxReference sr, AnchorSet& anchors){
+	uint32_t depthBeforeIsolation = sr.pathLength;
+	if(sr.tryIsolate()){
+		anchors.addAnchor(sr.beginOffset(), depthBeforeIsolation);
+		isolatedRewrite(state, std::move(sr));
+		return false;
+	}else if(sr.isInherit()){
+		anchors.addAnchor(sr.binarySearchPos(sr.expression->getPos())->begin, sr.pathLength);
+		return false;
+	}else{
+		return rewriteMemberAttrs(state, sr, anchors);
+	}
+}
+
+__attribute__((always_inline))
+static bool rewriteMemberAttrs(RewriteState& state, SyntaxReference& sr, AnchorSet& anchors){
+	nix::ExprAttrs* attrs = sr.attrs();
+
+	EvalStateForUpdate& ext = static_cast<EvalStateForUpdate&>(state.eval());
+
+	nix::ExprAttrs* recordedAttrs = dynamic_cast<nix::ExprAttrs*>(sr.expression);
+	
+	const nix::Bindings* updateBindings = nullptr;
+
+	if(recordedAttrs){
+		nix::Value& myValue = **ext.valueMap.at((RecordedExprAttrs*)recordedAttrs);
+
+		const nix::Bindings* myBindings = myValue.attrs();
+
+		if(const nix::Attr* updaterAttr = myBindings->get(ext.updateSymbol)){
+			nix::Value& updater = *updaterAttr->value;
+			ext.forceValue(updater, updaterAttr->pos);
+			nix::Value* vtemp;
+			if(updater.type() == nix::nFunction){
+				vtemp = ext.allocValue();
+				ext.callFunction(updater, myValue, *vtemp, nix::noPos);
+			}else{
+				vtemp = &updater;
+			}
+			ext.forceAttrs(*vtemp, updaterAttr->pos, "while evaluating updater");
+			updateBindings = vtemp->attrs();
+			generatePositiveRewrites(state, sr, *updateBindings, anchors);
+		}
+	}
+
+	bool anyRewrite = updateBindings != nullptr;
+
+	RawSyntaxReference rsr = sr;
+
+	if(attrs->inheritFromExprs){
+		for(auto& def : *attrs->inheritFromExprs.get()){
+			rsr.expression = def;
+			uint32_t pos = detachedRewrite(state, rsr);
+			if(pos != 0xFFFFFFFFu){
+				// Good enough but... aaarghhhh.
+				anchors.addAnchor(pos, sr.pathLength + 1);
+			}
+		}
+	}
+
+	for(auto& def : attrs->attrs.value()){
+		// For obvious reasons we do not descend to attributes we just overwrote.
+		if(updateBindings == nullptr || updateBindings->get(def.first) == nullptr){
+			anchors.addAnchor(sr.binarySearchPos(def.second.pos)->begin, sr.pathLength + 1);
+			SubexpressionFrame frame;
+			anyRewrite |= possiblyNonIsolatedRewrite(state, sr.getSubexpression(&frame, def.first), anchors);
+		}
+	}
+
+	for(uint32_t i = 0;i < attrs->dynamicAttrs->size();i++){
+		auto& dynAttr = attrs->dynamicAttrs->at(i);
+		rsr.expression = dynAttr.nameExpr;
+		uint32_t pos = detachedRewrite(state, rsr);
+		if(pos != 0xFFFFFFFFu){
+			anchors.addAnchor(pos, sr.pathLength);
+		}
+		
+		SubexpressionFrame frame;
+		possiblyNonIsolatedRewrite(state, sr.getDynamicSubexpression(&frame, i), anchors);
+		anchors.addAnchor(sr.binarySearchPos(dynAttr.pos)->begin, sr.pathLength + 1);
+	}
+
+	return anyRewrite;
+}
+
+bool EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 	RewriteState rewrite{
 		.pool = this->pool,
 		.defaultIndent = "",
@@ -284,7 +365,7 @@ void EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 		.expression = info.parseResult.rootExpression,
 	};
 
-	recursiveRewrite(rewrite, std::move(root));
+	isolatedRewrite(rewrite, std::move(root));
 
 	std::vector<Rewrite>& rwvec = rewrite.rewrites;
 
@@ -299,4 +380,6 @@ void EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 	}
 
 	out << string_view(*info.content).substr(cursor);
+
+	return !rwvec.empty();
 }

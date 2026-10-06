@@ -1,9 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <compare>
 #include <cstdint>
 #include <memory>
-#include <memory_resource>
 #include <nix/cmd/common-eval-args.hh>
 #include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-error.hh>
@@ -13,7 +13,6 @@
 #include <nix/util/error.hh>
 #include <nix/util/source-path.hh>
 #include <ostream>
-#include <sstream>
 
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/eval.hh>
@@ -23,7 +22,6 @@
 #include <nix/util/pos-table.hh>
 #include <nix/util/position.hh>
 #include <boost/dynamic_bitset.hpp>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -81,4 +79,25 @@ struct RewriteState{
 };
 std::pair<string_view,string_view> detectIndentation(string_view source);
 
-void generateUpdate(RewriteState& state, SyntaxReference& expr, const nix::Bindings& bindings);
+struct AnchorSet : std::map<uint32_t,uint32_t>{
+	// Indicates that declared at the specified location and depth is a value that must be kept.
+	void addAnchor(uint32_t pos,uint32_t depth){
+		auto itr = this->insert({pos,depth}).first;
+		itr->second = std::max(itr->second, depth);
+	}
+	// Indicates that declared at the specified location is an attribute set that must be kept.
+	void addAnchorForAttrs(uint32_t pos){
+		(*this)[pos] = 0xFFFFFFFFu;
+	}
+};
+
+// So how do these methods work?
+
+// The syntax reference must be to an isolated ExprAttrs or ExprLet. This erases EVERY declaration and subdeclaration that isn't anchored.
+void generateNegativeRewrites(RewriteState& state, SyntaxReference expr, const AnchorSet& anchors);
+// Rewrites the value of the SyntaxReference to the specified value. This will not erase unused declarations, but instead registers anchors to used declarations to the anchor set.
+void generatePositiveRewrites(RewriteState& state, SyntaxReference expr, const nix::Value& value, AnchorSet& anchors);
+// Rewrites each attribute of the ExprAttrs according to the bindings.
+void generatePositiveRewrites(RewriteState& state, SyntaxReference& expr, const nix::Bindings& bindings, AnchorSet& anchors);
+// 
+void generatePreservingAnchors(RewriteState& state, SyntaxReference expr, AnchorSet& anchors);

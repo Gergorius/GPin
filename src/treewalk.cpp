@@ -20,55 +20,6 @@ inline bool visitAttributeDefinitions(const nix::ExprAttrs* attrs,const Visitor&
 	return false;
 }
 
-template<typename Visitor>
-inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const Visitor& visit){
-	uint32_t index = 0;
-	const NixToken* cursor = boundary.data();
-	while(cursor->type != '{' && cursor->type != NixToken::kind_type::LET){
-		cursor++;
-	}
-	cursor++;
-	while(cursor->type != '}' && cursor->type != NixToken::kind_type::IN_KW){
-		const NixToken* begin = cursor;
-		if(cursor->type == NixToken::kind_type::INHERIT){
-			cursor++;
-			if(maybeWalkToClosingToken(cursor)){ // Is this inherit-from?
-				cursor++;
-				const NixToken* attrsBegin = cursor;
-				walkToToken(cursor, ';');
-				if(visit(index,InheritFromInfo{
-					AttrsDeclarationInfo{begin, cursor},
-					attrsBegin,
-				})){
-					return true;
-				}
-				cursor++;
-			}else{
-				walkToToken(cursor, ';');
-				if(visit(index,InheritInfo{
-					AttrsDeclarationInfo{begin,cursor},
-				})){
-					return true;
-				}
-				cursor++;
-			}
-		}else{
-			walkToToken(cursor, '=','.');
-			const NixToken* doteq = cursor;
-			walkToToken(cursor,';');
-			if(visit(index,BindingInfo{
-				AttrsDeclarationInfo{begin, cursor},
-				begin,
-				doteq
-			})){
-				return true;
-			}
-			cursor++;
-		}
-	}
-	return false;
-}
-
 void walkToTokens(const NixToken*& ptr,std::initializer_list<NixToken::kind_utype> types){
 	while(true){
 		for(auto type : types){
@@ -117,7 +68,7 @@ bool maybeWalkToClosingToken(const NixToken*& ptr){
 
 struct CollectPositions{
 	const nix::PosTable::Origin& origin;
-	std::unordered_set<uint32_t>& positions;
+	std::set<uint32_t>& positions;
 	bool operator()(const nix::ExprAttrs::AttrDef& def) const{
 		positions.insert(origin.offsetOf(def.pos));
 		if(def.chooseByKind(true, false, false)){
@@ -256,7 +207,7 @@ breakOuter:
 	};
 }
 
-nix::ExprAttrs* SyntaxReference::attrs(){
+nix::ExprAttrs* RawSyntaxReference::attrs() const{
 	nix::ExprLet* let = dynamic_cast<nix::ExprLet*>(expression);
 	return let == nullptr ? dynamic_cast<nix::ExprAttrs*>(expression) : let->attrs;
 }
@@ -304,7 +255,7 @@ SyntaxReference SyntaxReference::getSubexpression(SubexpressionFrame* frame,nix:
 	pathNode->name = name;
 	nix::ExprAttrs* expr = pathNode->getAttrs();
 	auto itr = expr->attrs->find(name);
-	nix::Expr* sub;
+	nix::Expr* sub = nullptr;
 	if(itr != expr->attrs->end()){
 		sub = itr->second.e;
 	}
@@ -333,15 +284,13 @@ SyntaxReference SyntaxReference::getDynamicSubexpression(SubexpressionFrame* fra
 	};
 }
 
-std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContaining(nix::EvalState& state,const std::unordered_set<uint32_t>& positions) const{
+std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContaining(nix::EvalState& state,const std::set<uint32_t>& positions) const{
 	if(isIsolated()){
 		std::vector<AttributeDeclaration> vec;
 		traverseAttrsDeclarations(boundary, [&](uint32_t index,const auto& def){
-			for(uint32_t pos : positions){
-				if(def.begin->begin <= pos && pos < def.endsemi->end){
-					vec.push_back(def);
-					return false;
-				}
+			auto itr = positions.lower_bound(def.begin->begin);
+			if(itr != positions.end() && *itr < def.endsemi->end){
+				vec.push_back(def);
 			}
 			return false;
 		});
@@ -382,7 +331,7 @@ std::vector<AttributeDeclaration> SyntaxReference::findAllDeclarations(nix::Eval
 		return {};
 	}
 
-	std::unordered_set<uint32_t> positions{};
+	std::set<uint32_t> positions{};
 
 	nix::ExprAttrs* parent = path->getAttrs();
 	if(path->name.symbol){

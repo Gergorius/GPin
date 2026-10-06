@@ -66,7 +66,7 @@ struct EvalStateForUpdate : EvalState{
 	// Call this after all load operations are performed. This evaluates all loaded attribute sets.
 	void finishLoad();
 
-	void doRewrite(std::ostream& out, const SourceInfo& sourceInfo);
+	bool doRewrite(std::ostream& out, const SourceInfo& sourceInfo);
 };
 
 struct RecordedExprAttrs : nix::ExprAttrs{

@@ -13,11 +13,13 @@
 #include <nix/expr/print.hh>
 #include <nix/expr/symbol-table.hh>
 #include <nix/expr/value.hh>
+#include <nix/util/pos-idx.hh>
 #include <nix/util/source-accessor.hh>
 #include <nix/util/source-path.hh>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -261,6 +263,9 @@ begin:
 			}
 			break;
 		case nix::tString:
+			if(value.context()){
+				rs.eval().error<nix::EvalError>("cannot serialize string with context").debugThrow();
+			}
 			state << STREAM(os,nix::printLiteralString(os, value.string_view()));
 			break;
 		case nix::tNull:
@@ -393,37 +398,8 @@ static void eraseDeclaration(RewriteState& state, const AttrsDeclarationInfo& in
 	});
 }
 
-// Erase a non-isolated expression.
-static void eraseNonIsolated(RewriteState& state, SyntaxReference expr){
-	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(state.eval());
-
-	for(uint32_t i = 0;i < decvec.size();i++){
-		eraseDeclaration(state, std::visit(GET_ADI,decvec[i]));
-	}
-}
-
-static void eraseDynamicAndInheritAttrs(RewriteState& state, SyntaxReference& expr){
-	std::unordered_set<uint32_t> positions;
-	for(auto& exp : expr.attrs()->attrs.value()){
-		if(exp.second.chooseByKind(false, true, true)){
-			positions.insert(expr.origin.offsetOf(exp.second.pos));
-		}
-	}
-	for(auto& dyn : expr.attrs()->dynamicAttrs.value()){
-		positions.insert(expr.origin.offsetOf(dyn.pos));
-	}
-	if(positions.empty()){
-		return;
-	}
-	auto result = expr.findMemberDeclarationsContaining(state.eval(), positions);
-	for(const auto& r : result){
-		eraseDeclaration(state, std::visit(GET_ADI,r));
-	}
-}
-
 // Find or create the body of the attribute set represented by the specified expression.
-template<bool mustExist = false>
-static FormatState findOrDeclareAttributeSet(RewriteState& rs, std::conditional_t<mustExist,SyntaxReference,const SyntaxReference&> expr){
+static FormatState findOrDeclareAttributeSet(RewriteState& rs, const SyntaxReference& expr, AnchorSet& anchors){
 	std::span<const NixToken> boundary;
 	const NixToken* cursor;
 	if(expr.isIsolated()){
@@ -441,29 +417,25 @@ static FormatState findOrDeclareAttributeSet(RewriteState& rs, std::conditional_
 				goto walkToBegin;
 			}
 		}
-		if constexpr(mustExist){
-			rs.eval().error<nix::EvalError>("expected to find an attribute set").panic();
-			return FormatState{};
-		}else{
-			FormatState fs = findOrDeclareAttributeSet(rs, expr.getParent());
 
-			formatIdentifier(rs, fs, expr.path->name.symbol);
-			fs << " = {";
+		FormatState fs = findOrDeclareAttributeSet(rs, expr.getParent(), anchors);
 
-			FormatState body = fs.split(rs);
+		fs << STREAM(os,nix::printAttributeName(os, rs.eval().symbols[expr.path->name.symbol])) << " = {";
 
-			newLine(rs, fs);
-			fs << "};";
+		FormatState body = fs.split(rs);
 
-			body.indentRepeatCount++;
+		newLine(rs, fs);
+		fs << "};";
 
-			return std::move(body);
-		}
+		body.indentRepeatCount++;
+
+		return std::move(body);
 	}
 walkToBegin:
 	while(cursor->type != '{'){
 		cursor++;
 	}
+	anchors.addAnchorForAttrs(cursor->begin);
 	FormatState fs = addRewrite(rs, cursor->end, cursor->end);
 	std::tie(fs.preindent,fs.indent) = detectIndentation(rs, boundary[0].begin, boundary[boundary.size() - 1].end);
 	fs.indentRepeatCount = 1;
@@ -471,7 +443,7 @@ walkToBegin:
 }
 
 // Prepare for completely rewriting the non-isolated expression. If it does not exist, declare an attribute for it.
-static FormatState findOrDeclareAttribute(RewriteState& rs, SyntaxReference expr){
+static FormatState findOrDeclareAttribute(RewriteState& rs, SyntaxReference expr, AnchorSet& anchors){
 
 	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(rs.eval());
 
@@ -480,7 +452,7 @@ static FormatState findOrDeclareAttribute(RewriteState& rs, SyntaxReference expr
 	FormatState fs;
 
 	if(decvec.empty() || expr.isInherit()){ // Inherit just won't do for us.
-		FormatState dec = findOrDeclareAttributeSet<true>(rs, expr.getParent());
+		FormatState dec = findOrDeclareAttributeSet(rs, expr.getParent(), anchors);
 
 		newLine(rs, dec);
 		dec << STREAM(os,nix::printAttributeName(os, rs.eval().symbols[expr.path->name.symbol])) << " = ";
@@ -488,6 +460,8 @@ static FormatState findOrDeclareAttribute(RewriteState& rs, SyntaxReference expr
 		dec << ";";
 	}else{
 		const BindingInfo& info = std::get<BindingInfo>(decvec[i++]);
+
+		anchors.addAnchor(info.doteq->end, expr.pathLength);
 
 		if(info.doteq->type != '='){
 			fs = addRewrite(rs, info.doteq->begin, info.endsemi->begin);
@@ -499,35 +473,83 @@ static FormatState findOrDeclareAttribute(RewriteState& rs, SyntaxReference expr
 		std::tie(fs.preindent, fs.indent) = detectIndentation(rs, info.doteq->begin, info.endsemi->begin);
 	}
 
-	while(i < decvec.size()){
-		auto d = decvec[i++];
-
-		if(std::holds_alternative<BindingInfo>(d)){
-			eraseDeclaration(rs, std::get<BindingInfo>(d));
-		}else{
-			// Remove the expression from the inherit.
-			const NixToken* begin = expr.binarySearchPos(expr.expression->getPos());
-			const NixToken* end = begin;
-			maybeWalkToClosingToken(end);
-			rs.rewrites.push_back({
-				.begin = (begin - 1)->end, // ...politely.
-				.end = end->end,
-			});
-		}
-	}
-
 	return std::move(fs);
 }
 
-static FormatState replaceSyntax(RewriteState& rs, SyntaxReference expr){
+static FormatState replaceSyntax(RewriteState& rs, SyntaxReference expr, AnchorSet& anchors){
+	uint32_t depthBeforeIsolation = expr.pathLength;
 	if(expr.tryIsolate()){
+		anchors.addAnchor(expr.beginOffset(), depthBeforeIsolation);
 		return addRewrite(rs, expr.beginOffset(), expr.endOffset());
 	}else{
-		return findOrDeclareAttribute(rs, std::move(expr));
+		return findOrDeclareAttribute(rs, std::move(expr), anchors);
 	}
 }
 
-static void generateRewrite(RewriteState& state, SyntaxReference expr, const nix::Value& value){
+// Erases EVERY declaration contained in the isolated ExprAttrs or ExprLet that isn't anchored.
+void generateNegativeRewrites(RewriteState& state, SyntaxReference expr, const AnchorSet& anchors){
+
+#define RANGE_HIT(itr,end_i) ( itr != anchors.end() && itr->first < end_i )
+
+	std::vector<std::pair<uint32_t,AttributeDeclaration>> vec;
+	traverseAttrsDeclarations(expr.boundary,[&vec](uint32_t,const auto& def){ vec.push_back({1, def}); return false; });
+
+	while(!vec.empty()){
+		auto [depth, d] = vec.back();
+		vec.pop_back();
+		const AttrsDeclarationInfo& dec = std::visit([](auto& a){ return (AttrsDeclarationInfo&)a; }, d);
+
+		auto itr = anchors.lower_bound(dec.begin->begin);
+
+		if(RANGE_HIT(itr, dec.endsemi->end)){
+			const NixToken* cursor = std::visit([](auto& a){
+				if constexpr(std::is_same_v<std::remove_cvref_t<decltype(a)>, BindingInfo>){
+					return (const NixToken*)nullptr;
+				}else{
+					return a.getAttrsBegin();
+				}
+			}, d);
+			if(cursor == nullptr){
+				BindingInfo bin = std::get<BindingInfo>(d);
+				while(bin.doteq->type == '.'){
+					bin = bin.next();
+					depth++;
+				}
+				while(RANGE_HIT(itr, dec.endsemi->end)){
+					if(depth < itr->second){
+						goto weNeedToGoDeeper;
+					}
+					itr++;
+				}
+				goto skipGoingDeeper;
+			
+			weNeedToGoDeeper:
+				cursor = bin.doteq + 1;
+				while(cursor->type != '{'){
+					cursor++;
+				}
+				traverseAttrsDeclarations(
+					{cursor, expr.boundary.data() + expr.boundary.size()},
+					[&vec,depth](uint32_t,const auto& def){ vec.push_back({depth + 1, def}); return false; });
+			skipGoingDeeper:
+
+			}else while(cursor != dec.endsemi){
+				auto itr2 = anchors.lower_bound(cursor->begin);
+				if(!RANGE_HIT(itr2, cursor->end)){
+					state.rewrites.push_back(Rewrite{
+						.begin = (cursor - 1)->end,
+						.end = cursor->end
+					});
+				}
+				cursor++;
+			}
+		}else{
+			eraseDeclaration(state, dec);
+		}
+	}
+}
+
+void generatePositiveRewrites(RewriteState& state, SyntaxReference expr, const nix::Value& value, AnchorSet& anchors){
 	if(value.type() == nix::nAttrs){
 		const nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(expr.expression);
 		if(!attrs){
@@ -537,45 +559,64 @@ static void generateRewrite(RewriteState& state, SyntaxReference expr, const nix
 		if(bindings.empty()){
 			goto defaultRewrite;
 		}
-
-		eraseDynamicAndInheritAttrs(state, expr);
-		for(auto& attrDef : attrs->attrs.value()){
-			if(bindings.get(attrDef.first) == nullptr && attrDef.second.chooseByKind(true, false, false)){
-				SubexpressionFrame frame;
-				eraseNonIsolated(state, expr.getSubexpression(&frame, attrDef.first));
-			}
-		}
-
-		bool hasNewBindings = false;
 		for(auto& binding : bindings){
-			if(attrs->attrs->contains(binding.name)){
-				SubexpressionFrame frame;
-				generateRewrite(state, expr.getSubexpression(&frame, binding.name), *binding.value);
-			}else{
-				hasNewBindings = true;
+			SubexpressionFrame frame;
+			SyntaxReference sr = expr.getSubexpression(&frame, binding.name);
+			if(sr.isInherit()){
+				sr.expression = nullptr; // Inherits are not preserved.
 			}
-		}
-
-		if(hasNewBindings){
-			FormatState f = findOrDeclareAttributeSet<true>(state, std::move(expr));
-
-			for(auto& binding : bindings){
-				if(!attrs->attrs->contains(binding.name)){
-					formatBinding(state, f.split(state), binding);
-				}
-			}
+			generatePositiveRewrites(state, std::move(sr), *binding.value, anchors);
 		}
 		return;
 	}
 
 defaultRewrite:
 
-	formatValue<false>(state, replaceSyntax(state, std::move(expr)), value);
+	formatValue<false>(state, replaceSyntax(state, std::move(expr), anchors), value);
 }
 
-void generateUpdate(RewriteState& state, SyntaxReference& expr, const nix::Bindings& bindings){
-	nix::ExprAttrs* a = expr.attrs();
+void generatePreservingAnchors(RewriteState& state, SyntaxReference expr, AnchorSet& anchors){
+	uint32_t depthBeforeIsolation = expr.pathLength;
+	if(expr.tryIsolate()){
+		anchors.addAnchor(expr.beginOffset(), depthBeforeIsolation);
+	}else{
+		for(auto d : expr.findAllDeclarations(state.eval())){
+			if(std::holds_alternative<BindingInfo>(d)){
+				BindingInfo bin = std::get<BindingInfo>(d);
+				anchors.addAnchor(bin.doteq->end, depthBeforeIsolation);
+			}else{
+				const NixToken* tok = expr.binarySearchPos(expr.expression->getPos());
+				anchors.addAnchor(tok->begin, depthBeforeIsolation);
+			}
+		}
+	}
+}
 
+/* This remains unused until we DARE descend lists.
+// This ASSUMES the expr is isolated!
+static void generateTopLevelRewrites(RewriteState& state, SyntaxReference expr, const nix::Value& value){
+	if(value.type() == nix::nAttrs){
+		const nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(expr.expression);
+		if(!attrs){
+			goto defaultRewrite;
+		}
+		const nix::Bindings& bindings = *value.attrs();
+		if(bindings.empty()){
+			goto defaultRewrite;
+		}
+		AnchorSet anchors;
+		generatePositiveRewrites(state, expr, value, anchors);
+		generateNegativeRewrites(state, expr, anchors);
+	}
+
+defaultRewrite:
+	
+	formatValue<false>(state, addRewrite(state, expr.beginOffset(), expr.endOffset()), value);
+}
+*/
+
+void generatePositiveRewrites(RewriteState& state, SyntaxReference& expr, const nix::Bindings& bindings, AnchorSet& anchors){
+	nix::ExprAttrs* a = expr.attrs();
 	std::vector<std::pair<nix::Symbol,const nix::Value*>> attrs;
 
 	for(auto& updateBinding : bindings){
@@ -587,6 +628,10 @@ void generateUpdate(RewriteState& state, SyntaxReference& expr, const nix::Bindi
 
 	for(auto [name, value] : attrs){
 		SubexpressionFrame frame;
-		generateRewrite(state, expr.getSubexpression(&frame,name), *value);
+		SyntaxReference sr = expr.getSubexpression(&frame, name);
+		if(sr.isInherit()){
+			sr.expression = nullptr; // Inherits are not preserved.
+		}
+		generatePositiveRewrites(state, std::move(sr), *value, anchors);
 	}
 }
