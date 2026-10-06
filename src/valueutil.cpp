@@ -24,6 +24,9 @@ static_assert(std::is_trivially_move_assignable_v<nix::Value>);
 
 EXPORT_PRIVATE_MEMBER(getInternalType,&nix::Value::getInternalType);
 
+// The formatter wants to know about context, therefore we do not consider strings with different context equal.
+#define EQ_CONSIDERS_STRING_CONTEXT
+
 using nix::InternalType;
 
 InternalType internalType(const nix::Value& v){
@@ -87,6 +90,22 @@ size_t NixValueComparer::hash(const nix::Value* vptr){
 	return sum;
 }
 
+static bool stringContextEq(const nix::Value* l,const nix::Value* r){
+	if(l->context() == r->context()){
+		return true;
+	}else if(l->context() == nullptr || r->context() == nullptr){
+		return false;
+	}else if(l->context()->size() != r->context()->size()){
+		return false;
+	}else{
+		nix::NixStringContext ca;
+		nix::NixStringContext cb;
+		nix::copyContext(*l, ca);
+		nix::copyContext(*r, cb);
+		return ca == cb;
+	}
+}
+
 bool NixValueComparer::eq(const nix::Value* l,const nix::Value* r){
 	using pair_type = std::pair<const nix::Value*,const nix::Value*>;
 
@@ -116,7 +135,12 @@ bool NixValueComparer::eq(const nix::Value* l,const nix::Value* r){
 				// That being said, we do not tell negative and positive zeroes apart because neither does nix.
 				return CHK(->fpoint());
 			case nix::tBool: return CHK(->boolean());
-			case nix::tString: return CHK(->string_view());
+			case nix::tString:
+				GUARD(l->string_view(),r->string_view());
+#ifdef EQ_CONSIDERS_STRING_CONTEXT
+				if(!stringContextEq(l, r)) return false;
+#endif
+				return true;
 			case nix::tPath: return CHK(->path());
 			case nix::tNull: return true;
 			case nix::tThunk: return CHK(->thunk().env) && CHK(->thunk().expr);
@@ -320,14 +344,22 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 			perfect = p->value == value || !std::isnan(value->fpoint());
 			break;
 		
+		// Deduplicating strings with different contexts produces an observable side effect. This is either solved by not considering them equal or marking them not perfectly equal.
+
+		case nix::tString:
+#ifndef EQ_CONSIDERS_STRING_CONTEXT
+			perfect = stringContextEq(p->value,value);
+			break;
+#endif
+		
 		// The following values can be deduplicated just fine.
 
 		case nix::tInt:
 		case nix::tBool:
 		case nix::tNull:
 		case nix::tPath:
-		case nix::tString:
 		case nix::tExternal:
+			perfect = true;
 			break;
 		
 		// The following values are errors.

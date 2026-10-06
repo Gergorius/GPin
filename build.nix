@@ -5,7 +5,7 @@ let
 		name = "pun";
 		src = fs.toSource {
 			root = ./.;
-			fileset = fs.unions [ ./src ./CMakeLists.txt ];
+			fileset = fs.unions [ ./src ./CMakeLists.txt ./tests ];
 		};
 		nativeBuildInputs = with pkgs; [
 			cmake
@@ -16,6 +16,7 @@ let
 			nix-expr
 			nix-cmd
 		];
+		doCheck = true;
 	};
 in
 	der

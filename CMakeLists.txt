@@ -25,3 +25,5 @@ target_sources(gpin-update
 )
 
 install(TARGETS gpin-update DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+add_subdirectory(tests)

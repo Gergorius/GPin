@@ -13,7 +13,6 @@ using nix::Expr;
 template<typename Visitor>
 decltype(auto) visitDynamicExpr(Expr* expr,Visitor&& visit){
 	using namespace nix;
-	const std::type_info& info = typeid(*expr);
 
 #define CASE(Name) if(auto p = dynamic_cast<Name*>(expr)){ return std::invoke(std::forward<Visitor>(visit), p); }
 
@@ -64,93 +63,93 @@ decltype(auto) visitDynamicExpr(const Expr* expr,Visitor&& visit){
 	return visitDynamicExpr(const_cast<Expr*>(expr), ConstVisitor<Visitor>{std::forward<Visitor>(visit)});
 }
 
-#define VSUB_FUN(Name) template<typename Visitor> void visitSubexprs(nix::Name* p,Visitor&& visit)
+#define VSUB_FUN(Name) template<typename Visitor> bool visitSubexprs(nix::Name* p,Visitor&& visit)
 
-VSUB_FUN(ExprInt){}
-VSUB_FUN(ExprFloat){}
-VSUB_FUN(ExprString){}
-VSUB_FUN(ExprPath){}
-VSUB_FUN(ExprInheritFrom){}
-VSUB_FUN(ExprVar){}
+VSUB_FUN(ExprInt){ return false; }
+VSUB_FUN(ExprFloat){ return false; }
+VSUB_FUN(ExprString){ return false; }
+VSUB_FUN(ExprPath){ return false; }
+VSUB_FUN(ExprInheritFrom){ return false; }
+VSUB_FUN(ExprVar){ return false; }
 VSUB_FUN(ExprSelect){
-	visit(p->e);
+	if(visit(p->e)) return true;
 	for(auto& i : p->getAttrPath()){
 		if(!i.symbol){
-			visit(i.expr);
+			if(visit(i.expr)) return true;
 		}
 	}
-	if(p->def) visit(p->def);
+	return p->def && visit(p->def);
 }
 VSUB_FUN(ExprOpHasAttr){
-	visit(p->e);
+	if(visit(p->e)) return true;
 	for(auto& i : p->attrPath){
 		if(!i.symbol){
-			visit(i.expr);
+			if(visit(i.expr)) return true;
 		}
 	}
+	return false;
 }
 VSUB_FUN(ExprAttrs){
 	if(p->inheritFromExprs){
 		for(auto& a : *p->inheritFromExprs){
-			visit(a);
+			if(visit(a)) return true;
 		}
 	}
 	for(auto& a : p->attrs.value()){
-		visit(a.second.e);
+		if(visit(a.second.e)) return true;
 	}
 	for(auto& a : p->dynamicAttrs.value()){
-		visit(a.nameExpr);
-		visit(a.valueExpr);
+		if(visit(a.nameExpr)) return true;
+		if(visit(a.valueExpr)) return true;
 	}
+	return false;
 };
 VSUB_FUN(ExprList){
 	for(auto& a : p->elems){
-		visit(a);
+		if(visit(a)) return true;
 	}
+	return false;
 };
 VSUB_FUN(ExprLambda){
 	std::optional<nix::Formals> f = p->getFormals();
 	if(f){
 		for(nix::Formal& o : f->formals){
-			if(o.def) visit(o.def);
+			if(o.def && visit(o.def)) return true;
 		}
 	}
-	visit(p->body);
+	return visit(p->body);
 }
 VSUB_FUN(ExprCall){
-	visit(p->fun);
+	if(visit(p->fun)) return true;
 	for(auto& arg : p->args.value()){
-		visit(arg);
+		if(visit(arg)) return true;
 	}
+	return false;
 }
 VSUB_FUN(ExprLet){
 	if(p->attrs->inheritFromExprs){
 		for(auto& a : *p->attrs->inheritFromExprs){
-			visit(a);
+			if(visit(a)) return true;
 		}
 	}
 	for(auto& a : p->attrs->attrs.value()){
-		visit(a.second.e);
+		if(visit(a.second.e)) return true;
 	}
-	visit(p->body);
+	return visit(p->body);
 }
 VSUB_FUN(ExprWith){
-	visit(p->attrs);
-	visit(p->body);
+	return visit(p->attrs) || visit(p->body);
 }
 VSUB_FUN(ExprIf){
-	visit(p->cond);
-	visit(p->then);
-	visit(p->else_);
+	return visit(p->cond) || visit(p->then) || visit(p->else_);
 }
 VSUB_FUN(ExprAssert){
-	visit(p->cond);
-	visit(p->body);
+	return visit(p->cond) || visit(p->body);
 }
 VSUB_FUN(ExprOpNot){
-	visit(p->e);
+	return visit(p->e);
 }
-#define BINOP {visit(p->e1); visit(p->e2); }
+#define BINOP {return visit(p->e1) || visit(p->e2); }
 
 VSUB_FUN(ExprOpEq) BINOP;
 VSUB_FUN(ExprOpNEq) BINOP;
@@ -160,19 +159,22 @@ VSUB_FUN(ExprOpConcatLists) BINOP;
 VSUB_FUN(ExprOpUpdate) BINOP;
 VSUB_FUN(ExprConcatStrings){
 	for(auto& pair : p->es){
-		visit(pair.second);
+		if(visit(pair.second)) return true;
 	}
+	return false;
 }
-VSUB_FUN(ExprPos){}
-VSUB_FUN(ExprBlackHole){}
+VSUB_FUN(ExprPos){ return false; }
+VSUB_FUN(ExprBlackHole){ return false; }
 
 template<typename Visitor>
 struct Subexprs{
 	Visitor visit;
 	template<typename T>
-	void operator()(T* expr){
+	bool operator()(T* expr){
 		if constexpr (!std::is_same_v<std::remove_cvref_t<T>, nix::Expr>) {
-			visitSubexprs(expr,visit);
+			return visitSubexprs(expr,visit);
+		}else{
+			return false;
 		}
 	}
 };
@@ -180,3 +182,4 @@ struct Subexprs{
 template<typename Visitor> decltype(auto) mkSubexprs(Visitor&& visit){
 	return Subexprs<Visitor>{std::forward<Visitor>(visit)};
 }
+
