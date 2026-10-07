@@ -12,8 +12,11 @@
 #include <nix/util/fmt.hh>
 #include <nix/util/pos-idx.hh>
 #include <nix/util/source-path.hh>
+#include <type_traits>
 #include <unordered_set>
 #include <boost/container_hash/hash.hpp>
+
+namespace gpin{
 
 // If these change I better know...
 static_assert(std::is_trivially_destructible_v<nix::Value>);
@@ -21,6 +24,7 @@ static_assert(std::is_trivially_copy_constructible_v<nix::Value>);
 static_assert(std::is_trivially_copy_assignable_v<nix::Value>);
 static_assert(std::is_trivially_move_constructible_v<nix::Value>);
 static_assert(std::is_trivially_move_assignable_v<nix::Value>);
+static_assert(std::is_same_v<nix::NixInt::Inner, int64_t>);
 
 EXPORT_PRIVATE_MEMBER(getInternalType,&nix::Value::getInternalType);
 
@@ -49,7 +53,7 @@ size_t NixValueComparer::hash(const nix::Value* vptr){
 			sum += std::hash<nix::NixFloat>{}(vptr->fpoint());
 			break;
 		case nix::tExternal:
-			sum = sum + std::hash<std::string>{}(vptr->external()->showType());
+			sum = sum + std::hash<std::string>{}(vptr->external()->typeOf());
 			break;
 		case nix::tPrimOp:
 			sum = sum + std::hash<const void*>{}(vptr->primOp());
@@ -90,6 +94,44 @@ size_t NixValueComparer::hash(const nix::Value* vptr){
 	return sum;
 }
 
+void forceForHashing(nix::EvalState& state, nix::Value& value){
+begin:
+	switch(internalType(value)){
+		case nix::tAttrs:
+			for(auto& binding : *value.attrs()){
+				state.forceValue(*binding.value, binding.pos);
+			}
+			break;
+		case nix::tListN:
+		case nix::tListSmall:
+			for(auto& val : value.listView()){
+				state.forceValue(*val, nix::noPos);
+			}
+			break;
+		case nix::tPrimOpApp:
+			forceForHashing(state, *value.primOpApp().left);
+			forceForHashing(state, *value.primOpApp().right);
+			break;
+		case nix::tApp:
+		case nix::tThunk:
+			state.forceValue(value, nix::noPos);
+			goto begin;
+		case nix::tUninitialized:
+		case nix::tInt:
+		case nix::tBool:
+		case nix::tNull:
+		case nix::tFloat:
+		case nix::tFailed:
+		case nix::tExternal:
+		case nix::tPrimOp:
+		case nix::tLambda:
+		case nix::tString:
+		case nix::tPath:
+		case nix::tNumberOfInternalTypes:
+			break;
+    }
+}
+
 static bool stringContextEq(const nix::Value* l,const nix::Value* r){
 	if(l->context() == r->context()){
 		return true;
@@ -106,14 +148,17 @@ static bool stringContextEq(const nix::Value* l,const nix::Value* r){
 	}
 }
 
-bool NixValueComparer::eq(const nix::Value* l,const nix::Value* r){
-	using pair_type = std::pair<const nix::Value*,const nix::Value*>;
+struct empty{};
+
+template<bool doForce,typename VPtr>
+static bool eqValues(VPtr l,VPtr r,std::conditional_t<doForce, nix::EvalState&, empty> state){
+	using pair_type = std::pair<VPtr,VPtr>;
 
 	std::array<std::byte, 0x1000> buf;
 	std::pmr::monotonic_buffer_resource res{buf.data(),buf.size()};
 	std::pmr::unordered_set<pair_type,boost::hash<pair_type>> seen{&res};
 
-	return [&seen](this const auto & recurse,const nix::Value* l,const nix::Value* r){
+	return [&](this const auto & recurse,VPtr l,VPtr r){
 		if(l == r){
 			return true;
 		}
@@ -122,7 +167,9 @@ bool NixValueComparer::eq(const nix::Value* l,const nix::Value* r){
 #define CHK(str) (l str == r str)
 #define REC(str) (recurse((l str),(r str)))
 
-		GUARD(internalType(*l),internalType(*r));
+		if(internalType(*l) != internalType(*r)){
+			goto recovery;
+		}
 		if(!seen.insert({l,r}).second){
 			return true;
 		}
@@ -143,8 +190,12 @@ bool NixValueComparer::eq(const nix::Value* l,const nix::Value* r){
 				return true;
 			case nix::tPath: return CHK(->path());
 			case nix::tNull: return true;
-			case nix::tThunk: return CHK(->thunk().env) && CHK(->thunk().expr);
-			case nix::tApp: return REC(->app().left) && REC(->app().right);
+			case nix::tThunk:
+				if(CHK(->thunk().env) && CHK(->thunk().expr)) return true;
+				break;
+			case nix::tApp: 
+				if(REC(->app().left) && REC(->app().right)) return true;
+				break;
 			case nix::tAttrs:{
 				GUARD(l->attrs()->size(),r->attrs()->size());
 				for(size_t i = 0;i < l->attrs()->size();i++){
@@ -172,11 +223,23 @@ bool NixValueComparer::eq(const nix::Value* l,const nix::Value* r){
 			case nix::tNumberOfInternalTypes:
 				break;
 		}
+	recovery:
+		if constexpr(doForce){
+			if(l->isThunk()){
+				state.forceValue(*l, nix::noPos);
+			}
+			if(r->isThunk()){
+				state.forceValue(*r, nix::noPos);
+			}
+		}
 		return false;
 	}(l,r);
 }
 
 #undef REC
+
+bool NixValueComparer::eq(const nix::Value* l,const nix::Value* r){ return eqValues<false,const nix::Value*>(l,r,{}); }
+bool LazyNixValueComparer::eq(nix::Value* l,nix::Value* r) const { return eqValues<true,nix::Value*>(l,r,state); }
 
 void deeperForce(nix::EvalState& state, nix::Value& value){
 
@@ -374,4 +437,6 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 
 const nix::Value* NixValueInternPool::intern(nix::Value* value){
 	return recursiveIntern(value).first;
+}
+
 }

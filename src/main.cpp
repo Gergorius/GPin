@@ -6,6 +6,7 @@
 #include <nix/cmd/common-eval-args.hh>
 #include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-gc.hh>
+#include <nix/expr/eval-settings.hh>
 #include <nix/expr/value.hh>
 #include <nix/main/common-args.hh>
 #include <nix/main/shared.hh>
@@ -20,14 +21,12 @@
 #include <sstream>
 #include <vector>
 
+namespace gpin{
+
 EXPORT_PRIVATE_MEMBER(getInnerAutoArgs, &nix::MixEvalArgs::autoArgs);
 
 using nix::ref;
 using nix::Strings;
-
-void baba(){
-	
-}
 
 struct GPinCommand : virtual nix::RootArgs, virtual nix::StoreCommand, virtual nix::MixEvalArgs, virtual nix::MixCommonArgs{
     std::shared_ptr<nix::Store> evalStore;
@@ -142,6 +141,9 @@ void GPinCommand::run(ref<nix::Store>){
 }
 
 void mainWrapped(int argc, char** argv){
+	nix::evalSettings.enableImportFromDerivation.setDefault(true); // Option: allow-import-from-derivation
+	nix::evalSettings.enableNativeCode.setDefault(true); // Option: allow-unsafe-native-code-during-evaluation
+	
 	GPinCommand command("gpin-update");
 
 	command.parseCmdline(nix::argvToStrings(argc, argv));
@@ -149,13 +151,13 @@ void mainWrapped(int argc, char** argv){
 	((nix::Command&)command).run();
 }
 
+}
+
 int main(int argc, char ** argv){
 	nix::initNix();
 	nix::initGC();
 
-	shared_ptr<nix::Store> store = nix::openStore();
-
-	return nix::handleExceptions(argv[0], [&]() { mainWrapped(argc, argv); });
+	return nix::handleExceptions(argv[0], [&]() { gpin::mainWrapped(argc, argv); });
 }
 
 namespace{

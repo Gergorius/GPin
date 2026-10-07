@@ -27,6 +27,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace gpin{
+
 using std::shared_ptr;
 
 struct RecordedExprAttrs;
@@ -74,3 +76,5 @@ struct RecordedExprAttrs : nix::ExprAttrs{
 	virtual void eval(EvalState &state, Env &env, Value &v) override;
 	virtual Value* maybeThunk(EvalState& state, Env& env) override;
 };
+
+}

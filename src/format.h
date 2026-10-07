@@ -29,6 +29,8 @@
 #include "treewalk.h"
 #include "valueutil.h"
 
+namespace gpin{
+
 using std::span;
 using std::string;
 using std::string_view;
@@ -101,3 +103,5 @@ void generatePositiveRewrites(RewriteState& state, SyntaxReference expr, const n
 void generatePositiveRewrites(RewriteState& state, SyntaxReference& expr, const nix::Bindings& bindings, AnchorSet& anchors);
 // 
 void generatePreservingAnchors(RewriteState& state, SyntaxReference expr, AnchorSet& anchors);
+
+}

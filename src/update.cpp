@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 
+namespace gpin{
+
 EXPORT_PRIVATE_MEMBER(getImportResolutionCache, &nix::EvalState::importResolutionCache);
 EXPORT_PRIVATE_MEMBER(getFileEvalCache, &nix::EvalState::fileEvalCache);
 
@@ -382,4 +384,6 @@ bool EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 	out << string_view(*info.content).substr(cursor);
 
 	return !rwvec.empty();
+}
+
 }

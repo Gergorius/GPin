@@ -1,4 +1,7 @@
 {
+	verify = {old, new}: assert old // old.update == new; "trivial successfully updated";
+	update.verify = null;
+
 	bool = false;
 	update.bool = true;
 
