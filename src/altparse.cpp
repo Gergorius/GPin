@@ -14,6 +14,8 @@
 
 #include "steal.h"
 
+namespace gpin{
+
 EXPORT_PRIVATE_MEMBER(positionToDocComment, &nix::EvalState::positionToDocComment);
 EXPORT_PRIVATE_MEMBER(posTableResolve, &nix::PosTable::resolve);
 
@@ -98,4 +100,6 @@ void parseExprFromString(ParseResult& result, nix::EvalState& state, const nix::
 #endif
 		}
 	}
+}
+
 }

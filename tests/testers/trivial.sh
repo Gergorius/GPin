@@ -12,5 +12,5 @@ cp $SOURCE $TARGET
 $PROGRAM $TARGET
 
 nix-instantiate --eval --strict --raw --arg old "import $SOURCE" --arg new "import ./$TARGET" - <<EOF
-{old, new}: assert (old // old.update == new); "$TARGET successfully updated"
+{old, new}@args: old.verify args
 EOF

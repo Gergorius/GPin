@@ -8,6 +8,8 @@
 #include <type_traits>
 #include <utility>
 
+namespace gpin{
+
 using nix::Expr;
 
 template<typename Visitor>
@@ -183,3 +185,4 @@ template<typename Visitor> decltype(auto) mkSubexprs(Visitor&& visit){
 	return Subexprs<Visitor>{std::forward<Visitor>(visit)};
 }
 
+}

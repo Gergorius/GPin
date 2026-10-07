@@ -6,6 +6,7 @@
 #include <nix/expr/value.hh>
 
 #include <memory_resource>
+#include <nix/util/logging.hh>
 #include <span>
 #include <tuple>
 #include <utility>
@@ -15,8 +16,10 @@
 #include <gc/gc_allocator.h>
 #include <nix/util/pos-idx.hh>
 
-#include "primops.h"
+#include "valueutil.h"
 #include "exprutil.h"
+
+namespace gpin{
 
 using nix::Value;
 using nix::ValueVector;
@@ -68,7 +71,7 @@ struct ExprValue : public Expr{
 };
 
 template<typename T>
-struct ExprThunk : CustomThunk{
+struct ExprThunk : AbstractExternalValue{
 	const T* internal;
 	Env* env;
 	ExprThunk(){}
@@ -117,7 +120,7 @@ private:
 	};
 
 public:
-	virtual void eval(nix::EvalState& state, nix::Value& v) override{
+	void operator()(nix::EvalState& state, nix::Value& v){
 		helper(std::index_sequence_for<Modifiers...>(), state, v);
 	}
 };
@@ -159,9 +162,7 @@ decltype(auto) mkModifiers(EvalState& state, Env& env, const EType* val){
 
 	TName* t = new (gc_allocator<TName>().allocate(1)) TName(val, &env, { Modifiers(state, env, *val)...});
 
-	Value* v = state.allocValue();
-	mkCustomThunk(state, t, *v);
-	return v;
+	return buildCustomThunk(state, t);
 }
 
 struct always_true{
@@ -244,6 +245,8 @@ struct SpanModifier{
 	}
 };
 
+}
+
 #define MK_RAW_GREEDY(name) \
 template<> \
 struct Greedy<nix::name> : nix::name{ \
@@ -265,6 +268,8 @@ Value* Greedy<nix::name>::maybeThunk(EvalState& state, Env& env) { \
 }
 
 #include "greedy.h"
+
+namespace gpin{
 
 Value* Greedy<ExprCall>::maybeThunk(EvalState& state, Env& env){
 	Value* fThunk = fun->maybeThunk(state, env);
@@ -299,4 +304,6 @@ Value* Greedy<ExprLet>::maybeThunk(EvalState& state, Env& env){
 }
 Value* Greedy<ExprWith>::maybeThunk(EvalState& state, Env& env){
 	return maybeThunkOnBody<ExprWith>(state, env, *this);
+}
+
 }

@@ -26,6 +26,8 @@
 #pragma clang diagnostic error "-Wswitch"
 #pragma clang diagnostic error "-Wimplicit-fallthrough"
 
+namespace gpin{
+
 using std::string;
 using std::string_view;
 
@@ -634,4 +636,6 @@ void generatePositiveRewrites(RewriteState& state, SyntaxReference& expr, const 
 		}
 		generatePositiveRewrites(state, std::move(sr), *value, anchors);
 	}
+}
+
 }

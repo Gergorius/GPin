@@ -2,6 +2,9 @@ let
 	x = "you";
 	t = { a = 0; b = 1; c = 2; };
 in {
+	verify = {old, new}: assert old // old.update == new; "attrs successfully updated";
+	update.verify = null;
+
 	baba = { inherit x; };
 	update.baba.y = 10;
 

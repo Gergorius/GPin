@@ -5,6 +5,8 @@
 #include <nix/expr/value.hh>
 #include <nix/util/pos-idx.hh>
 
+namespace gpin{
+
 template<typename Visitor>
 inline bool visitAttributeDefinitions(const nix::ExprAttrs* attrs,const Visitor& visit){
 	for(auto& pair : attrs->attrs.value()){
@@ -495,3 +497,5 @@ popStack:
 endBracket:
 	return data;
 }*/
+
+}

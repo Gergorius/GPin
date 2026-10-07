@@ -15,6 +15,8 @@
 
 #include "altparse.h"
 
+namespace gpin{
+
 struct AttrPathNode{
 	AttrPathNode* parent;
 	// This will either be an ExprAttrs or an ExprLet.
@@ -202,4 +204,6 @@ inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const V
 		}
 	}
 	return false;
+}
+
 }

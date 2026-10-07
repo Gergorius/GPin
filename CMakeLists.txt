@@ -4,6 +4,8 @@ find_package(PkgConfig REQUIRED)
 
 project(GPin)
 
+add_compile_options(-fstandalone-debug)
+
 add_executable(gpin-update)
 
 target_compile_features(gpin-update PRIVATE cxx_std_23)
@@ -18,7 +20,7 @@ target_sources(gpin-update
 		src/format.cpp
 		src/greedy.cpp
 		src/treewalk.cpp
-		src/primops.cpp
+		src/primitives.cpp
 		src/update.cpp
 		src/valueutil.cpp
 		src/main.cpp
@@ -26,4 +28,5 @@ target_sources(gpin-update
 
 install(TARGETS gpin-update DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+enable_testing()
 add_subdirectory(tests)

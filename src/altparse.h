@@ -20,6 +20,8 @@ using YYLTYPE = nix::parser::BisonParser::location_type;
 namespace nix { class Parser : public parser::BisonParser { using BisonParser::BisonParser; }; }
 YY_DECL;
 
+namespace gpin{
+
 struct NixToken{
 	using kind_type = nix::Parser::token_kind_type;
 	using kind_utype = std::underlying_type_t<kind_type>;
@@ -54,3 +56,5 @@ struct ParseResult{
 };
 
 void parseExprFromString(ParseResult& result, nix::EvalState& state, const nix::Pos::Origin& origin, const nix::SourcePath& basePath, nix::Exprs& exprs, std::string_view input);
+
+}

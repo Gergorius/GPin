@@ -17,6 +17,8 @@ There are three main special cases:
 #include <nix/expr/value.hh>
 #include <type_traits>
 
+namespace gpin{
+
 using nix::Value;
 using nix::ValueVector;
 using nix::EvalState;
@@ -102,4 +104,6 @@ G* obtrudeAsGreedy(T* arg){
 	arg->~T(); // Recall that the destructor must still be called after moving!
 	G* p = new (arg) G(std::move(temp));
 	return p;
+}
+
 }
