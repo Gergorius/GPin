@@ -1,8 +1,8 @@
 #pragma once
 
 #include <algorithm>
-#include <compare>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <nix/cmd/common-eval-args.hh>
 #include <nix/expr/attr-set.hh>
@@ -42,25 +42,29 @@ struct RewriteLink{
 	inline string_view view() const { return std::visit([](const auto& data){ return string_view(data); }, data); }
 };
 
-// A rewrite instruction.
-struct Rewrite{
-	uint32_t begin;
-	uint32_t end;
-	std::unique_ptr<RewriteLink> replacement;
-	inline std::partial_ordering operator<=>(const Rewrite& t) const{
-		const Rewrite* that = &t;
-		if(this->end <= that->begin){
-			return this->begin <=> that->end;
+struct UIntRange{
+	const uint32_t begin;
+	const uint32_t end;
+	UIntRange(uint32_t b,uint32_t e): begin(b), end(e){
+		if(e < b){
+			throw std::exception();
 		}
-		if(that->end <= this->begin){
-			return this->end <=> that->begin;
-		}
-		return std::partial_ordering::unordered;
 	}
 };
 
-inline std::ostream& operator<<(std::ostream& out,Rewrite& rw){
-	RewriteLink* lnk = rw.replacement.get();
+struct CompareRanges{
+	bool operator()(const UIntRange& l, const UIntRange& r) const{
+		if(l.end <= r.begin){
+			return l.begin < r.end;
+		}
+		if(r.end <= l.begin){
+			return l.end < r.begin;
+		}
+		throw nix::Error("Overlapping rewrites: (%1% %2%) (%3% %4%)",l.begin,l.end,r.begin,r.end);
+	}
+};
+
+inline std::ostream& operator<<(std::ostream& out,RewriteLink* lnk){
 	while(lnk != nullptr){
 		out << lnk->view();
 		lnk = lnk->next.get();
@@ -74,8 +78,10 @@ struct RewriteState{
 	const string_view defaultIndent;
 	const string_view source;
 	const nix::SourcePath& basePath;
-	using list_Rewrite = std::vector<Rewrite>;
-	list_Rewrite rewrites;
+
+	// We permit multiple rewrites at the same location but we do not permit overlaps.
+	std::multimap<UIntRange,std::unique_ptr<RewriteLink>,CompareRanges> replacement;
+
 	nix::EvalState& eval(){ return pool.state; }
 	uint32_t resolvePos(nix::PosIdx pos) const;
 };

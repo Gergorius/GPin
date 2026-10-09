@@ -106,9 +106,6 @@ bool SyntaxReference::tryIsolate(){
 	if(path == nullptr){
 		return true;
 	}
-	if(expression == nullptr){
-		return false;
-	}
 	nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(this->expression);
 	if(attrs == nullptr || attrs->pos != nix::noPos && isOnlyDefinitionInDynamic()){
 		nix::PosIdx pos;
@@ -256,11 +253,7 @@ SyntaxReference SyntaxReference::getSubexpression(SubexpressionFrame* frame,nix:
 	pathNode->expr = this->expression;
 	pathNode->name = name;
 	nix::ExprAttrs* expr = pathNode->getAttrs();
-	auto itr = expr->attrs->find(name);
-	nix::Expr* sub = nullptr;
-	if(itr != expr->attrs->end()){
-		sub = itr->second.e;
-	}
+	nix::Expr* sub = expr->attrs->at(name).e;
 	return RawSyntaxReference{
 		.origin = origin,
 		.boundary = boundary,
@@ -329,10 +322,6 @@ std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContain
 
 // Find every place where this non-isolated value is declared! MAY miss empty declarations.
 std::vector<AttributeDeclaration> SyntaxReference::findAllDeclarations(nix::EvalState& state) const{
-	if(expression == nullptr){
-		return {};
-	}
-
 	std::set<uint32_t> positions{};
 
 	nix::ExprAttrs* parent = path->getAttrs();

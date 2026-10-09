@@ -369,21 +369,17 @@ bool EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 
 	isolatedRewrite(rewrite, std::move(root));
 
-	std::vector<Rewrite>& rwvec = rewrite.rewrites;
-
-	std::sort(rwvec.begin(),rwvec.end());
-
 	uint32_t cursor = 0;
 
-	for(Rewrite& rw : rwvec){
-		out << string_view(*info.content).substr(cursor, rw.begin - cursor);
-		out << rw;
-		cursor = rw.end;
+	for(auto& pair : rewrite.replacement){
+		out << string_view(*info.content).substr(cursor, pair.first.begin - cursor);
+		out << pair.second.get();
+		cursor = pair.first.end;
 	}
 
 	out << string_view(*info.content).substr(cursor);
 
-	return !rwvec.empty();
+	return !rewrite.replacement.empty();
 }
 
 }

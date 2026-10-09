@@ -4,9 +4,11 @@
 #include "treewalk.h"
 #include "valueutil.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <format>
+#include <memory>
 #include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-error.hh>
 #include <nix/expr/nixexpr.hh>
@@ -16,6 +18,7 @@
 #include <nix/util/pos-idx.hh>
 #include <nix/util/source-accessor.hh>
 #include <nix/util/source-path.hh>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -30,6 +33,9 @@ namespace gpin{
 
 using std::string;
 using std::string_view;
+using nix::Value;
+using nix::ExprAttrs;
+using nix::Bindings;
 
 struct FormatState{
 	RewriteLink* cursor;
@@ -38,8 +44,8 @@ struct FormatState{
 	uint32_t indentRepeatCount = 0;
 public:
 	FormatState(){}
-	FormatState(Rewrite& t){
-		t.replacement.reset(cursor = new RewriteLink());
+	FormatState(std::unique_ptr<RewriteLink>& t){
+		t.reset(cursor = new RewriteLink());
 	}
 	FormatState(FormatState&& that){
 		cursor = that.cursor;
@@ -64,7 +70,7 @@ private:
 		return *nl;
 	}
 public:
-	FormatState split(RewriteState& rs){
+	FormatState split(){
 		FormatState temp;
 		temp.cursor = cursor;
 		temp.preindent = preindent;
@@ -184,7 +190,7 @@ struct chart_info{
 	inline chart_info(): path(), strength(0){}
 };
 
-static void chart(nix::Expr* expr, nix::Value* value, std::vector<nix::Symbol>& path, std::unordered_map<nix::Value*, chart_info>& paths){
+static void chart(nix::Expr* expr, Value* value, std::vector<nix::Symbol>& path, std::unordered_map<Value*, chart_info>& paths){
 	if(!path.empty()){
 		auto& info = paths[value];
 		int strength = expr == nullptr ? 1 : 2;
@@ -198,7 +204,7 @@ static void chart(nix::Expr* expr, nix::Value* value, std::vector<nix::Symbol>& 
 	if(value->type() != nix::nAttrs){
 		return;
 	}
-	const nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(expr);
+	const ExprAttrs* attrs = dynamic_cast<ExprAttrs*>(expr);
 	for(auto& bnd : *value->attrs()){
 		nix::Expr* subexpr = nullptr;
 		if(attrs != nullptr){
@@ -214,10 +220,13 @@ static void chart(nix::Expr* expr, nix::Value* value, std::vector<nix::Symbol>& 
 }
 
 static FormatState addRewrite(RewriteState& rs,uint32_t begin,uint32_t end){
-	rs.rewrites.push_back({.begin = begin,.end = end});
-	FormatState fs(rs.rewrites.back());
+	FormatState fs(rs.replacement.insert({{begin, end}, nullptr})->second);
 	std::tie(fs.preindent,fs.indent) = detectIndentation(rs, begin, end);
 	return std::move(fs);
+}
+
+static void eraseRange(RewriteState& rs,uint32_t begin,uint32_t end){
+	rs.replacement.insert({{begin, end}, nullptr});
 }
 
 static bool newLine(RewriteState& rs, FormatState& fs){
@@ -233,7 +242,7 @@ static bool newLine(RewriteState& rs, FormatState& fs){
 
 static void addBrackets(RewriteState& rs, FormatState& state){
 	state << "(";
-	FormatState temp = state.split(rs);
+	FormatState temp = state.split();
 	state << ")";
 	state = std::move(temp);
 }
@@ -241,7 +250,7 @@ static void addBrackets(RewriteState& rs, FormatState& state){
 #define STREAM(os,code) [&]() -> std::string{ std::ostringstream os; code; return std::move(os).str(); }()
 
 template<bool atomic>
-static void formatValue(RewriteState& rs, FormatState state, const nix::Value& value);
+static void formatValue(RewriteState& rs, FormatState state, const Value& value);
 
 static void formatBinding(RewriteState& rs, FormatState state, const nix::Attr& attr){
 	newLine(rs, state);
@@ -249,12 +258,12 @@ static void formatBinding(RewriteState& rs, FormatState state, const nix::Attr& 
 	state << STREAM(os,nix::printAttributeName(os, rs.eval().symbols[attr.name]));
 	state << " = ";
 
-	formatValue<false>(rs, state.split(rs), *attr.value);
+	formatValue<false>(rs, state.split(), *attr.value);
 	state << ";";
 }
 
 template<bool atomic>
-static void formatValue(RewriteState& rs, FormatState state, const nix::Value& value){
+static void formatValue(RewriteState& rs, FormatState state, const Value& value){
 begin:
 	switch(internalType(value)){
 		case nix::tBool:
@@ -312,7 +321,7 @@ begin:
 		}break;
 		
 		case nix::tAttrs:{
-			const nix::Bindings& bindings = *value.attrs();
+			const Bindings& bindings = *value.attrs();
 			if(bindings.size() == 0){
 				state << "{}";
 				break;
@@ -321,7 +330,7 @@ begin:
 
 			state.indentRepeatCount++;
 			for(auto& binding : bindings){
-				formatBinding(rs, state.split(rs), binding);
+				formatBinding(rs, state.split(), binding);
 			}
 
 			state.indentRepeatCount--;
@@ -344,7 +353,7 @@ begin:
 				if(!newLine(rs, state) && notFirst){
 					state << " ";
 				}
-				formatValue<true>(rs, state.split(rs), *val);
+				formatValue<true>(rs, state.split(), *val);
 				notFirst = true;
 			}
 
@@ -354,7 +363,7 @@ begin:
 		}break;
 
 		case nix::tPrimOp:{
-			const nix::Value& btin = rs.eval().getBuiltins();
+			const Value& btin = rs.eval().getBuiltins();
 			for(auto& attr : *btin.attrs()){
 				if(NixValueComparer::eq(&value, attr.value)){
 					state << "builtins." << STREAM(os, nix::printAttributeName(os, rs.eval().symbols[attr.name]));
@@ -366,7 +375,7 @@ begin:
 		
 		case nix::tPrimOpApp:{
 			if(atomic) addBrackets(rs, state);
-			formatValue<false>(rs, state.split(rs), *value.primOpApp().left);
+			formatValue<false>(rs, state.split(), *value.primOpApp().left);
 			state << " ";
 			formatValue<true>(rs, std::move(state), *value.primOpApp().right);
 		}break;
@@ -387,114 +396,119 @@ begin:
 }
 
 static void eraseDeclaration(RewriteState& state, const AttrsDeclarationInfo& info){
-	uint32_t endpos = info.endsemi->end;
-	if(state.source[endpos] == '\n'){
-		endpos++;
-		while(state.source[endpos] == ' ' || state.source[endpos] == '\t'){
-			endpos++;
-		}
-	}
-	state.rewrites.push_back(Rewrite{
-		.begin = info.begin->begin,
-		.end = endpos,
-	});
+	eraseRange(state, (info.begin - 1)->end, info.endsemi->end);
 }
 
-// Find or create the body of the attribute set represented by the specified expression.
-static FormatState findOrDeclareAttributeSet(RewriteState& rs, const SyntaxReference& expr, AnchorSet& anchors){
+// Find or create the body of the attribute set represented by the specified expression. The state will be positioned at the end of a line and the caller is expected to add a new line immediately.
+static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxReference& src, AnchorSet& anchors){
 	std::span<const NixToken> boundary;
 	const NixToken* cursor;
-	if(expr.isIsolated()){
-		boundary = expr.boundary;
-		cursor = expr.boundary.data();
-		goto walkToBegin;
+	if(src.isIsolated()){
+		boundary = src.boundary;
+		cursor = src.boundary.data();
+		goto walkToBody;
 	}
 	{
-		std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(rs.eval());
+		std::vector<AttributeDeclaration> decvec = src.findAllDeclarations(state.eval());
 		for(uint32_t i = 0;i < decvec.size();i++){
 			BindingInfo& info = std::get<BindingInfo>(decvec[i]);
 			if(info.doteq->type == '='){
 				boundary = { info.begin, info.endsemi };
 				cursor = info.doteq + 1;
-				goto walkToBegin;
+				goto walkToBody;
 			}
 		}
 
-		FormatState fs = findOrDeclareAttributeSet(rs, expr.getParent(), anchors);
+		FormatState fs = findOrDeclareAttributeSet(state, src.getParent(), anchors);
+		newLine(state, fs);
 
-		fs << STREAM(os,nix::printAttributeName(os, rs.eval().symbols[expr.path->name.symbol])) << " = {";
-
-		FormatState body = fs.split(rs);
-
-		newLine(rs, fs);
+		fs << STREAM(os,nix::printAttributeName(os, state.eval().symbols[src.path->name.symbol])) << " = {";
+		FormatState body = fs.split();
+		newLine(state, fs);
 		fs << "};";
 
 		body.indentRepeatCount++;
-
 		return std::move(body);
 	}
-walkToBegin:
+walkToBody:
 	while(cursor->type != '{'){
 		cursor++;
 	}
+	const NixToken* openBracket = cursor;
 	anchors.addAnchorForAttrs(cursor->begin);
-	FormatState fs = addRewrite(rs, cursor->end, cursor->end);
-	std::tie(fs.preindent,fs.indent) = detectIndentation(rs, boundary[0].begin, boundary[boundary.size() - 1].end);
+
+	maybeWalkToClosingToken(cursor);
+	cursor--;
+
+	FormatState fs = addRewrite(state, cursor->end, cursor->end);
+	std::tie(fs.preindent,fs.indent) = detectIndentation(state, boundary[0].begin, boundary[boundary.size() - 1].end);
 	fs.indentRepeatCount = 1;
-	return std::move(fs);
+	if(openBracket == cursor){
+		FormatState tfs = fs.split();
+		fs.indentRepeatCount--;
+		newLine(state, fs);
+		return tfs;
+	}else{
+		return fs;
+	}
 }
 
-// Prepare for completely rewriting the non-isolated expression. If it does not exist, declare an attribute for it.
-static FormatState findOrDeclareAttribute(RewriteState& rs, SyntaxReference expr, AnchorSet& anchors){
-
-	std::vector<AttributeDeclaration> decvec = expr.findAllDeclarations(rs.eval());
-
-	uint32_t i = 0;
-
-	FormatState fs;
-
-	if(decvec.empty() || expr.isInherit()){ // Inherit just won't do for us.
-		FormatState dec = findOrDeclareAttributeSet(rs, expr.getParent(), anchors);
-
-		newLine(rs, dec);
-		dec << STREAM(os,nix::printAttributeName(os, rs.eval().symbols[expr.path->name.symbol])) << " = ";
-		fs = dec.split(rs);
-		dec << ";";
+// Prepare for completely rewriting the syntax. The syntax may or may not be isolated. It SHOULD NOT be an inherit/inherit-from syntax.
+static FormatState replaceSyntax(RewriteState& state, SyntaxReference src, AnchorSet& anchors){
+	uint32_t depthBeforeIsolation = src.pathLength;
+	if(src.tryIsolate()){
+		anchors.addAnchor(src.beginOffset(), depthBeforeIsolation);
+		return addRewrite(state, src.beginOffset(), src.endOffset());
 	}else{
-		const BindingInfo& info = std::get<BindingInfo>(decvec[i++]);
+		std::vector<AttributeDeclaration> decvec = src.findAllDeclarations(state.eval());
+		const BindingInfo& info = std::get<BindingInfo>(decvec[0]);
 
-		anchors.addAnchor(info.doteq->end, expr.pathLength);
+		anchors.addAnchor(info.doteq->end, src.pathLength);
 
+		FormatState fs;
 		if(info.doteq->type != '='){
-			fs = addRewrite(rs, info.doteq->begin, info.endsemi->begin);
-			fs << "=";
+			fs = addRewrite(state, (info.doteq - 1)->end, info.endsemi->begin);
+			fs << " = ";
 		}else{
-			fs = addRewrite(rs, info.doteq[1].begin, info.endsemi->begin);
+			fs = addRewrite(state, (info.doteq + 1)->begin, info.endsemi->begin);
 		}
 
-		std::tie(fs.preindent, fs.indent) = detectIndentation(rs, info.doteq->begin, info.endsemi->begin);
-	}
+		std::tie(fs.preindent, fs.indent) = detectIndentation(state, info.begin->begin, info.endsemi->end);
 
-	return std::move(fs);
+		return fs;
+	}
 }
 
-static FormatState replaceSyntax(RewriteState& rs, SyntaxReference expr, AnchorSet& anchors){
-	uint32_t depthBeforeIsolation = expr.pathLength;
-	if(expr.tryIsolate()){
-		anchors.addAnchor(expr.beginOffset(), depthBeforeIsolation);
-		return addRewrite(rs, expr.beginOffset(), expr.endOffset());
-	}else{
-		return findOrDeclareAttribute(rs, std::move(expr), anchors);
+void generatePositiveRewrites(RewriteState& state, SyntaxReference src, const Value& value, AnchorSet& anchors);
+
+template<typename BindingsT>
+void smartRewriteAttrs(RewriteState& state, SyntaxReference& src, const BindingsT& bindings, AnchorSet& anchors){
+	std::optional<FormatState> newBindings;
+	ExprAttrs* a = src.attrs();
+	for(auto& attr : bindings){
+		if(a->attrs->contains(attr.name) && a->attrs->at(attr.name).chooseByKind(true, false, false)){
+			SubexpressionFrame frame;
+			generatePositiveRewrites(state, src.getSubexpression(&frame, attr.name), *attr.value, anchors);
+		}else{
+			if(!newBindings){
+				newBindings = findOrDeclareAttributeSet(state, src, anchors);
+			}
+			FormatState& fs = newBindings.value();
+			newLine(state, fs);
+			fs << STREAM(os,nix::printAttributeName(os, state.eval().symbols[attr.name])) << " = ";
+			formatValue<false>(state, fs.split(), *attr.value);
+			fs << ";";
+		}
 	}
 }
 
 // Erases EVERY declaration contained in the isolated ExprAttrs or ExprLet that isn't anchored.
-void generateNegativeRewrites(RewriteState& state, SyntaxReference expr, const AnchorSet& anchors){
+void generateNegativeRewrites(RewriteState& state, SyntaxReference src, const AnchorSet& anchors){
 
 #define RANGE_HIT(itr,end_i) ( itr != anchors.end() && itr->first < end_i )
 
 	std::vector<std::pair<uint32_t,AttributeDeclaration>> vec;
-	traverseAttrsDeclarations(expr.boundary,[&vec](uint32_t,const auto& def){ vec.push_back({1, def}); return false; });
+	traverseAttrsDeclarations(src.boundary,[&vec](uint32_t,const auto& def){ vec.push_back({1, def}); return false; });
 
 	while(!vec.empty()){
 		auto [depth, d] = vec.back();
@@ -531,17 +545,14 @@ void generateNegativeRewrites(RewriteState& state, SyntaxReference expr, const A
 					cursor++;
 				}
 				traverseAttrsDeclarations(
-					{cursor, expr.boundary.data() + expr.boundary.size()},
+					{cursor, src.boundary.data() + src.boundary.size()},
 					[&vec,depth](uint32_t,const auto& def){ vec.push_back({depth + 1, def}); return false; });
 			skipGoingDeeper:
 
 			}else while(cursor != dec.endsemi){
 				auto itr2 = anchors.lower_bound(cursor->begin);
 				if(!RANGE_HIT(itr2, cursor->end)){
-					state.rewrites.push_back(Rewrite{
-						.begin = (cursor - 1)->end,
-						.end = cursor->end
-					});
+					eraseRange(state, (cursor - 1)->end, cursor->end);
 				}
 				cursor++;
 			}
@@ -551,24 +562,17 @@ void generateNegativeRewrites(RewriteState& state, SyntaxReference expr, const A
 	}
 }
 
-void generatePositiveRewrites(RewriteState& state, SyntaxReference expr, const nix::Value& value, AnchorSet& anchors){
+void generatePositiveRewrites(RewriteState& state, SyntaxReference expr, const Value& value, AnchorSet& anchors){
 	if(value.type() == nix::nAttrs){
-		const nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(expr.expression);
+		const ExprAttrs* attrs = dynamic_cast<ExprAttrs*>(expr.expression);
 		if(!attrs){
 			goto defaultRewrite;
 		}
-		const nix::Bindings& bindings = *value.attrs();
+		const Bindings& bindings = *value.attrs();
 		if(bindings.empty()){
 			goto defaultRewrite;
 		}
-		for(auto& binding : bindings){
-			SubexpressionFrame frame;
-			SyntaxReference sr = expr.getSubexpression(&frame, binding.name);
-			if(sr.isInherit()){
-				sr.expression = nullptr; // Inherits are not preserved.
-			}
-			generatePositiveRewrites(state, std::move(sr), *binding.value, anchors);
-		}
+		smartRewriteAttrs(state, expr, bindings, anchors);
 		return;
 	}
 
@@ -596,13 +600,13 @@ void generatePreservingAnchors(RewriteState& state, SyntaxReference expr, Anchor
 
 /* This remains unused until we DARE descend lists.
 // This ASSUMES the expr is isolated!
-static void generateTopLevelRewrites(RewriteState& state, SyntaxReference expr, const nix::Value& value){
+static void generateTopLevelRewrites(RewriteState& state, SyntaxReference expr, const Value& value){
 	if(value.type() == nix::nAttrs){
-		const nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(expr.expression);
+		const ExprAttrs* attrs = dynamic_cast<ExprAttrs*>(expr.expression);
 		if(!attrs){
 			goto defaultRewrite;
 		}
-		const nix::Bindings& bindings = *value.attrs();
+		const Bindings& bindings = *value.attrs();
 		if(bindings.empty()){
 			goto defaultRewrite;
 		}
@@ -617,25 +621,28 @@ defaultRewrite:
 }
 */
 
-void generatePositiveRewrites(RewriteState& state, SyntaxReference& expr, const nix::Bindings& bindings, AnchorSet& anchors){
-	nix::ExprAttrs* a = expr.attrs();
-	std::vector<std::pair<nix::Symbol,const nix::Value*>> attrs;
+struct ConstAttr{
+	nix::Symbol name;
+	nix::PosIdx pos;
+	const Value* value;
+};
+
+void generatePositiveRewrites(RewriteState& state, SyntaxReference& expr, const Bindings& bindings, AnchorSet& anchors){
+	ExprAttrs* a = expr.attrs();
+	std::vector<ConstAttr> attrs;
 
 	for(auto& updateBinding : bindings){
 		if(a->attrs->contains(updateBinding.name)){
 			deeperForce(state.eval(), *updateBinding.value);
-			attrs.push_back({updateBinding.name,state.pool.intern(updateBinding.value)});
+			attrs.push_back({updateBinding.name,updateBinding.pos,state.pool.intern(updateBinding.value)});
 		}
 	}
 
-	for(auto [name, value] : attrs){
-		SubexpressionFrame frame;
-		SyntaxReference sr = expr.getSubexpression(&frame, name);
-		if(sr.isInherit()){
-			sr.expression = nullptr; // Inherits are not preserved.
-		}
-		generatePositiveRewrites(state, std::move(sr), *value, anchors);
-	}
+	std::sort(attrs.begin(),attrs.end(),[&](const auto& l,const auto& r){
+		return l.pos < r.pos;
+	});
+
+	smartRewriteAttrs(state, expr, attrs, anchors);
 }
 
 }
