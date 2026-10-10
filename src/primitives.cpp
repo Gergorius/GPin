@@ -1,5 +1,4 @@
 
-#include <exception>
 #include <gc/gc_allocator.h>
 #include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-error.hh>
@@ -16,20 +15,18 @@
 #include <nix/util/users.hh>
 #include <nix/util/processes.hh>
 #include <optional>
-#include <unordered_map>
-#include "valueutil.h"
+
+#include "primitives.h"
 
 namespace gpin{
-
-// XXXXX This is stupid.
-
-// The only extra builtin I need is a function that takes a FOD and builds it without complaining that the hash is wrong. Which, given what this program is for, is a perfectly logical thing to have. Right now I am in the process of figuring out what a supporting nix library should be like and what kind of builtins it needs.
 
 using nix::EvalState;
 using nix::Value;
 using nix::PosIdx;
 
-void prim_exec(const nix::Bindings& bindings, EvalState& state, const PosIdx& pos, Value& v){
+void exec(EvalState& state, const PosIdx& pos, Value& v, Value* args){
+
+	const nix::Bindings& bindings = fromValue(state, args, pos, "while evaluating the argument to exec");
 
 	nix::Derivation d;
 	nix::RunOptions options;
@@ -89,87 +86,21 @@ void prim_exec(const nix::Bindings& bindings, EvalState& state, const PosIdx& po
 	nix::BindingsBuilder builder = state.buildBindings(3);
 	builder.push_back(nix::Attr(
 		state.symbols.create("exit"),
-		coerceToValue(state, a)
+		allocValue(state, a)
 	));
 	builder.push_back(nix::Attr(
 		state.symbols.create("output"),
-		coerceToValue(state, result)
+		allocValue(state, result)
 	));
 	v.mkAttrs(builder);
 }
 
-struct Memoization : AbstractExternalValue{
-	nix::Value* target;
-	bool entered = false;
-	std::unordered_map<nix::Value*, nix::Value*, NixValueComparer, LazyNixValueComparer, gc_allocator<std::pair<nix::Value* const,nix::Value*>>> cache;
-	Memoization(nix::Value* t, EvalState& state): target(t), cache(0x10, NixValueComparer(), LazyNixValueComparer(state)){
-	}
-};
-
-static void prim_getNixCacheDir(EvalState& state, Value& val){
-	val.mkPath(state.rootPath(nix::absPath(nix::getCacheDir()).string()), state.mem);
 }
 
-static void prim_memoizedInvoke(Memoization* memo, nix::Value* arg, EvalState& state, const nix::PosIdx& pos, Value& val){
-	if(memo->entered){
-		state.error<nix::EvalError>("memoization was recursively entered too soon").atPos(pos).debugThrow();
-	}
-	memo->entered = true;
-	nix::Value* memoValue;
-	try{
-		forceForHashing(state, *arg);
-		auto [itr, inserted] = memo->cache.insert({arg, nullptr});
-		if(inserted){
-			itr->second = state.allocValue();
-			itr->second->mkApp(memo->target, arg);
-		}
-		memoValue = itr->second;
-		memo->entered = false;
-	}catch(std::exception e){
-		memo->entered = false;
-		throw;
-	}
-	state.forceValue(*memoValue, nix::noPos);
-	val = *memoValue;
+extern "C" void gpin_exec(EvalState& state, Value& v){
+	v = gpin::primop<gpin::exec>;
 }
 
-static void prim_makeMemoize(nix::Value* function, EvalState& state, const nix::PosIdx& pos, Value& val){
-	Memoization* mz = new (gc_allocator<Memoization>().allocate(1)) Memoization(function, state);
-	nix::Value* mzv = state.allocValue();
-	mzv->mkExternal(mz);
-	val.mkPrimOpApp(&primop<&prim_memoizedInvoke>, mzv);
-}
-
-static void makePrimops(EvalState& state, const PosIdx pos, Value**, Value& v){
-	nix::BindingsBuilder builder = state.buildBindings(2);
-
-	builder.push_back(nix::Attr(
-		state.symbols.create("nixCacheDir"),
-		&primop<&prim_getNixCacheDir>
-	));
-
-	builder.push_back(nix::Attr(
-		state.symbols.create("exec"),
-		&primop<&prim_exec>
-	));
-	
-	builder.push_back(nix::Attr(
-		state.symbols.create("memoize"),
-		&primop<&prim_makeMemoize>
-	));
-
-	v.mkAttrs(builder);
-}
-
-nix::RegisterPrimOp gpin(nix::PrimOp{
-	.name="gpin",
-	.args={},
-	.arity=0,
-	.doc=std::nullopt,
-	.addTrace=false,
-	.impl=&makePrimops,
-	.experimentalFeature=std::nullopt,
-	.internal=false
-});
-
+extern "C" void gpin_getNixCacheDir(EvalState& state, Value& v){
+	v.mkPath(state.rootPath(nix::absPath(nix::getCacheDir()).string()), state.mem);
 }
