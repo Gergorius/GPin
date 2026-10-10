@@ -1,5 +1,7 @@
-{
-	pkgs ? import <nixpkgs> {}
+let
+	pins = import ./pins.nix;
+in {
+	pkgs ? pins.pkgs,
 }:
 	pkgs.linkFarm "dependencies" {
 		nix = pkgs.nix;

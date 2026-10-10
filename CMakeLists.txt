@@ -6,13 +6,20 @@ project(GPin)
 
 add_compile_options(-fstandalone-debug)
 
+add_library(gpin-natives
+	SHARED
+		src/primitives.cpp
+)
+
 add_executable(gpin-update)
 
 target_compile_features(gpin-update PRIVATE cxx_std_23)
+target_compile_features(gpin-natives PRIVATE cxx_std_23)
 
 pkg_check_modules(nix REQUIRED IMPORTED_TARGET nix-expr nix-cmd)
 
 target_link_libraries(gpin-update PRIVATE PkgConfig::nix)
+target_link_libraries(gpin-natives PRIVATE PkgConfig::nix)
 
 target_sources(gpin-update
 	PRIVATE
@@ -20,13 +27,13 @@ target_sources(gpin-update
 		src/format.cpp
 		src/greedy.cpp
 		src/treewalk.cpp
-		src/primitives.cpp
 		src/update.cpp
 		src/valueutil.cpp
 		src/main.cpp
 )
 
 install(TARGETS gpin-update DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS gpin-natives DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 enable_testing()
 add_subdirectory(tests)

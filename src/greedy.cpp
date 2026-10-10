@@ -16,6 +16,7 @@
 #include <gc/gc_allocator.h>
 #include <nix/util/pos-idx.hh>
 
+#include "primitives.h"
 #include "valueutil.h"
 #include "exprutil.h"
 
@@ -88,6 +89,7 @@ struct SimulationThunk : ExprThunk<T>{
 	std::tuple<Modifiers...> mfers;
 	static_assert(std::is_trivially_destructible_v<decltype(mfers)>);
 	SimulationThunk(const T* internal,Env* env,std::tuple<Modifiers...> mod): ExprThunk<T>(internal,env), mfers(mod){}
+
 private:
 	template<size_t... index>
 	void helper(std::index_sequence<index...>, nix::EvalState& state, nix::Value& v){
@@ -126,6 +128,12 @@ public:
 };
 
 template<typename T>
+void evalSimulationThunk(nix::EvalState& state, nix::PosIdx pos, nix::Value& v, nix::Value* st){
+	T* thunk = fromValue(state, st, pos, "in argument to evalSimulationThunk");
+	(*thunk)(state, v);
+}
+
+template<typename T>
 struct mem_ptr_parent{};
 
 template<typename A,typename B>
@@ -162,7 +170,7 @@ decltype(auto) mkModifiers(EvalState& state, Env& env, const EType* val){
 
 	TName* t = new (gc_allocator<TName>().allocate(1)) TName(val, &env, { Modifiers(state, env, *val)...});
 
-	return buildCustomThunk(state, t);
+	return allocValue(state, mkAp(&primop<evalSimulationThunk<TName>>,t));
 }
 
 struct always_true{
