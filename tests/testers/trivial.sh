@@ -9,8 +9,8 @@ export NIX_LOG_DIR=$(pwd)/nix-log
 TARGET=$(basename $SOURCE)
 cp $SOURCE $TARGET
 
-$PROGRAM $TARGET
+$PROGRAM $TARGET --extra-experimental-features "pipe-operators"
 
-nix-instantiate --eval --strict --raw --arg old "import $SOURCE" --arg new "import ./$TARGET" - <<EOF
+nix-instantiate --eval --strict --raw --arg old "import $SOURCE" --arg new "import ./$TARGET" --extra-experimental-features "pipe-operators" - <<EOF
 {old, new}@args: old.verify args
 EOF

@@ -14,3 +14,4 @@ set(INPUT_DIR ${CMAKE_CURRENT_LIST_DIR}/input)
 
 makeTrivialTest(trivial "${INPUT_DIR}/trivial.nix")
 makeTrivialTest(attrs "${INPUT_DIR}/attrs.nix")
+makeTrivialTest(expr "${INPUT_DIR}/expr.nix")

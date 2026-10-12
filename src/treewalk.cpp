@@ -88,7 +88,7 @@ struct CollectPositions{
 };
 
 bool SyntaxReference::isOnlyDefinitionInDynamic() const{
-	AttrPathNode* node = path;
+	const AttrPathNode* node = path;
 	while(node != nullptr){
 		if(node->name.symbol){
 			if(node->getAttrs()->pos != nix::noPos){
@@ -154,10 +154,8 @@ SyntaxReference RawSyntaxReference::descendToIsolated(nix::ExprAttrs* attrs){
 	return RawSyntaxReference{
 		.origin = origin,
 		.boundary = {begin, cursor},
-		.pathLength = 0,
-		.path = nullptr,
 		.expression = attrs,
-	};
+	}.asIsolated();
 }
 
 SyntaxReference RawSyntaxReference::descendToIsolated(nix::ExprLet* let){
@@ -200,10 +198,8 @@ breakOuter:
 	return RawSyntaxReference{
 		.origin = origin,
 		.boundary = {bestTokIn, end},
-		.pathLength = 0,
-		.path = nullptr,
 		.expression = let,
-	};
+	}.asIsolated();
 }
 
 nix::ExprAttrs* RawSyntaxReference::attrs() const{
@@ -224,10 +220,8 @@ SyntaxReference SyntaxReference::getBody(){
 		return RawSyntaxReference{
 			.origin = origin,
 			.boundary = {cursor, boundary.data() + boundary.size()},
-			.pathLength = 0,
-			.path = nullptr,
 			.expression = let->body,
-		};
+		}.asIsolated();
 	}else{
 		nix::ExprWith* with = static_cast<nix::ExprWith*>(expression);
 		const NixToken* cursor = boundary.data();
@@ -240,10 +234,8 @@ SyntaxReference SyntaxReference::getBody(){
 		return RawSyntaxReference{
 			.origin = origin,
 			.boundary = {cursor, boundary.data() + boundary.size()},
-			.pathLength = 0,
-			.path = nullptr,
 			.expression = with->body
-		};
+		}.asIsolated();
 	}
 }
 
@@ -254,29 +246,33 @@ SyntaxReference SyntaxReference::getSubexpression(SubexpressionFrame* frame,nix:
 	pathNode->name = name;
 	nix::ExprAttrs* expr = pathNode->getAttrs();
 	nix::Expr* sub = expr->attrs->at(name).e;
-	return RawSyntaxReference{
-		.origin = origin,
-		.boundary = boundary,
-		.pathLength = pathLength + 1,
-		.path = pathNode,
-		.expression = sub
-	};
+	return SyntaxReference(
+		RawSyntaxReference{
+			.origin = origin,
+			.boundary = boundary,
+			.expression = sub
+		},
+		pathLength + 1,
+		pathNode
+	);
 }
 
 SyntaxReference SyntaxReference::getDynamicSubexpression(SubexpressionFrame* frame,uint32_t index){
 	AttrPathNode* pathNode = &frame->node;
-	nix::ExprAttrs* expr = pathNode->getAttrs();
+	nix::ExprAttrs* expr = dynamic_cast<nix::ExprAttrs*>(expression);
 	auto& se = expr->dynamicAttrs->at(index);
 	pathNode->parent = this->path;
 	pathNode->expr = this->expression;
 	pathNode->name = se.nameExpr;
-	return RawSyntaxReference{
-		.origin = origin,
-		.boundary = boundary,
-		.pathLength = pathLength + 1,
-		.path = pathNode,
-		.expression = se.valueExpr
-	};
+	return SyntaxReference(
+		RawSyntaxReference{
+			.origin = origin,
+			.boundary = boundary,
+			.expression = se.valueExpr
+		},
+		pathLength + 1,
+		pathNode
+	);
 }
 
 std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContaining(nix::EvalState& state,const std::set<uint32_t>& positions) const{
@@ -301,10 +297,8 @@ std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContain
 						SyntaxReference partition = RawSyntaxReference{
 							.origin = origin,
 							.boundary = {info.doteq + 1, info.endsemi},
-							.pathLength = 0,
-							.path = nullptr,
 							.expression = expression,
-						};
+						}.asIsolated();
 						vec.append_range(partition.findMemberDeclarationsContaining(state,positions));
 						}break;
 					case '.':

@@ -1,3 +1,6 @@
+
+# This file contains a few trivial updates.
+
 {
 	verify = {old, new}: assert old // old.update == new; "trivial successfully updated";
 	update.verify = null;

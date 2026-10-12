@@ -1,22 +1,35 @@
-{ pkgs, stdenv, lib, ... }:
 let
-	fs = lib.fileset;
-	der = pkgs.clangStdenv.mkDerivation {
-		name = "pun";
-		src = fs.toSource {
-			root = ./.;
-			fileset = fs.unions [ ./src ./CMakeLists.txt ./tests ];
+	pins = import ./pins.nix;
+
+	build = { pkgs ? pins.pkgs }:
+		let {
+			inherit (pkgs) stdenv lib;
+			
+			fs = lib.fileset;
+
+			gpin-derivation = pkgs.clangStdenv.mkDerivation {
+				name = "gpin";
+				src = fs.toSource {
+					root = ./.;
+					fileset = fs.unions [ ./src ./CMakeLists.txt ./tests ];
+				};
+				nativeBuildInputs = with pkgs; [
+					cmake
+					nix.dev
+					pkg-config
+				];
+				buildInputs = with pkgs.nix.libs; [
+					nix-expr
+					nix-cmd
+				];
+				postInstall = "env > $out/env.txt";
+				doCheck = true;
+			};
+
+			body = {
+				gpin-update = gpin-derivation;
+				gpin = pkgs.callPackage ./gpin body;
+			};
 		};
-		nativeBuildInputs = with pkgs; [
-			cmake
-			nix.dev
-			pkg-config
-		];
-		buildInputs = with pkgs.nix.libs; [
-			nix-expr
-			nix-cmd
-		];
-		doCheck = true;
-	};
 in
-	der
+	build

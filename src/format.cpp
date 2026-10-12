@@ -422,7 +422,7 @@ static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxRe
 		FormatState fs = findOrDeclareAttributeSet(state, src.getParent(), anchors);
 		newLine(state, fs);
 
-		fs << STREAM(os,nix::printAttributeName(os, state.eval().symbols[src.path->name.symbol])) << " = {";
+		fs << STREAM(os,nix::printAttributeName(os, state.eval().symbols[src.getName().symbol])) << " = {";
 		FormatState body = fs.split();
 		newLine(state, fs);
 		fs << "};";
@@ -455,7 +455,7 @@ walkToBody:
 
 // Prepare for completely rewriting the syntax. The syntax may or may not be isolated. It SHOULD NOT be an inherit/inherit-from syntax.
 static FormatState replaceSyntax(RewriteState& state, SyntaxReference src, AnchorSet& anchors){
-	uint32_t depthBeforeIsolation = src.pathLength;
+	uint32_t depthBeforeIsolation = src.getPathLength();
 	if(src.tryIsolate()){
 		anchors.addAnchor(src.beginOffset(), depthBeforeIsolation);
 		return addRewrite(state, src.beginOffset(), src.endOffset());
@@ -463,7 +463,7 @@ static FormatState replaceSyntax(RewriteState& state, SyntaxReference src, Ancho
 		std::vector<AttributeDeclaration> decvec = src.findAllDeclarations(state.eval());
 		const BindingInfo& info = std::get<BindingInfo>(decvec[0]);
 
-		anchors.addAnchor(info.doteq->end, src.pathLength);
+		anchors.addAnchor(info.doteq->end, src.getPathLength());
 
 		FormatState fs;
 		if(info.doteq->type != '='){
@@ -582,7 +582,7 @@ defaultRewrite:
 }
 
 void generatePreservingAnchors(RewriteState& state, SyntaxReference expr, AnchorSet& anchors){
-	uint32_t depthBeforeIsolation = expr.pathLength;
+	uint32_t depthBeforeIsolation = expr.getPathLength();
 	if(expr.tryIsolate()){
 		anchors.addAnchor(expr.beginOffset(), depthBeforeIsolation);
 	}else{

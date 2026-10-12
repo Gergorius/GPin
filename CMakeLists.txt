@@ -13,8 +13,8 @@ add_library(gpin-natives
 
 add_executable(gpin-update)
 
-target_compile_features(gpin-update PRIVATE cxx_std_23)
-target_compile_features(gpin-natives PRIVATE cxx_std_23)
+target_compile_features(gpin-update PRIVATE cxx_std_26)
+target_compile_features(gpin-natives PRIVATE cxx_std_26)
 
 pkg_check_modules(nix REQUIRED IMPORTED_TARGET nix-expr nix-cmd)
 
