@@ -1,3 +1,6 @@
+
+# This file contains several tests for how gpin-update rewrites weird attribute sets.
+
 let
 	x = "you";
 	t = { a = 0; b = 1; c = 2; };
@@ -75,4 +78,12 @@ in {
 		bird.float = true;
 		bird.sink = false;
 	};
+
+	foliage.defeat = 5;
+	foliage.push = 6;
+	foliage.pull = 7;
+	foliage.more = 8;
+	foliage = {};
+	foliage = {};
+	update.foliage = "empty";
 }

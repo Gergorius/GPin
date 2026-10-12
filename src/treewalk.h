@@ -18,12 +18,12 @@
 namespace gpin{
 
 struct AttrPathNode{
-	AttrPathNode* parent;
+	const AttrPathNode* parent;
 	// This will either be an ExprAttrs or an ExprLet.
 	nix::Expr* expr;
 	nix::AttrName name; // Dynamic attributes can also be nested.
 	AttrPathNode(): parent(nullptr), expr(nullptr), name(nullptr){}
-	inline nix::ExprAttrs* getAttrs(){
+	inline nix::ExprAttrs* getAttrs() const{
 		nix::ExprLet* let = dynamic_cast<nix::ExprLet*>(expr);
 		return let == nullptr ? dynamic_cast<nix::ExprAttrs*>(expr) : let->attrs;
 	}
@@ -84,9 +84,7 @@ struct SyntaxReference;
 struct RawSyntaxReference{
 	const nix::PosTable::Origin& origin;
 	std::span<const NixToken> boundary;
-	uint32_t pathLength;
-	AttrPathNode* path;
-	nix::Expr* expression;
+	nix::Expr* const expression;
 	// Find the token containing the position.
 	inline const NixToken* binarySearchPos(nix::PosIdx pos) const{
 		return &*std::lower_bound(boundary.begin(),boundary.end(),NixToken(origin.offsetOf(pos)));
@@ -99,6 +97,14 @@ struct RawSyntaxReference{
 	inline uint32_t endOffset() const{
 		return boundary[boundary.size() - 1].end;
 	}
+	inline RawSyntaxReference rawWithExpression(nix::Expr* expr) const{
+		return RawSyntaxReference{
+			.origin = origin,
+			.boundary = boundary,
+			.expression = expr
+		};
+	}
+	inline SyntaxReference asIsolated();
 	// If this is an ExprAttrs or ExprLet, returns the attributes. Otherwise returns nullptr.
 	nix::ExprAttrs* attrs() const;
 	// Create a syntax reference to a descendant expression ASSUMING it is an isolated attribute set.
@@ -119,21 +125,27 @@ It is possible for attribute sets to not have an isolated form because they can 
 
 */
 struct SyntaxReference : RawSyntaxReference{
-	SyntaxReference(RawSyntaxReference&& t): RawSyntaxReference(t){}
+private:
+	uint32_t pathLength;
+	const AttrPathNode* path;
+	inline SyntaxReference(const RawSyntaxReference& t, uint32_t pl, const AttrPathNode* p): RawSyntaxReference(t), pathLength(pl), path(p){}
+public:
+	inline explicit SyntaxReference(const RawSyntaxReference& t): RawSyntaxReference(t), pathLength(0), path(nullptr){}
 	SyntaxReference(const SyntaxReference&) = delete;
 	SyntaxReference& operator=(const SyntaxReference&) = delete;
 	SyntaxReference(SyntaxReference&&) = default;
 	SyntaxReference& operator=(SyntaxReference&&) = delete;
+	inline uint32_t getPathLength() const{ return pathLength; }
 	// Get the parent syntax reference for this non-isolated syntax.
 	inline const SyntaxReference getParent() const{
-		return RawSyntaxReference{
+		return SyntaxReference(RawSyntaxReference{
 			.origin = origin,
 			.boundary = boundary,
-			.pathLength = pathLength - 1,
-			.path = path->parent,
 			.expression = path->expr
-		};
+		}, pathLength - 1, path->parent);
 	}
+	// Returns the nix attribute name of this non-isolated SyntaxReference.
+	inline const nix::AttrName& getName() const{ return path->name; }
 	// Is this an isolated syntax reference?
 	inline bool isIsolated() const{
 		return path == nullptr;
@@ -156,6 +168,7 @@ struct SyntaxReference : RawSyntaxReference{
 	std::vector<AttributeDeclaration> findAllDeclarations(nix::EvalState& state) const;
 };
 
+inline SyntaxReference RawSyntaxReference::asIsolated(){ return SyntaxReference(*this); }
 
 template<typename Visitor>
 inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const Visitor& visit){

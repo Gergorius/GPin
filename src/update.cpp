@@ -239,9 +239,7 @@ static uint32_t detachedRewrite(RewriteState& state, RawSyntaxReference rsr){
 	}
 	uint32_t acc = 0xFFFFFFFFu;
 	visitDynamicExpr(rsr.expression, mkSubexprs([&](nix::Expr* ex){
-		RawSyntaxReference rsr2 = rsr;
-		rsr2.expression = ex;
-		acc = std::min(detachedRewrite(state, rsr2), acc);
+		acc = std::min(detachedRewrite(state, rsr.rawWithExpression(ex)), acc);
 		RF;
 	}));
 	return acc;
@@ -258,22 +256,20 @@ static void isolatedRewrite(RewriteState& state, SyntaxReference sr){
 		}
 	}else{
 		visitDynamicExpr(sr.expression, mkSubexprs([&](nix::Expr* ex){
-			RawSyntaxReference rsr2 = sr;
-			rsr2.expression = ex;
-			detachedRewrite(state, rsr2);
+			detachedRewrite(state, sr.rawWithExpression(ex));
 			RF;
 		}));
 	}
 }
 
 static bool possiblyNonIsolatedRewrite(RewriteState& state, SyntaxReference sr, AnchorSet& anchors){
-	uint32_t depthBeforeIsolation = sr.pathLength;
+	uint32_t depthBeforeIsolation = sr.getPathLength();
 	if(sr.tryIsolate()){
 		anchors.addAnchor(sr.beginOffset(), depthBeforeIsolation);
 		isolatedRewrite(state, std::move(sr));
 		return false;
 	}else if(sr.isInherit()){
-		anchors.addAnchor(sr.binarySearchPos(sr.expression->getPos())->begin, sr.pathLength);
+		anchors.addAnchor(sr.binarySearchPos(sr.expression->getPos())->begin, depthBeforeIsolation);
 		return false;
 	}else{
 		return rewriteMemberAttrs(state, sr, anchors);
@@ -313,15 +309,12 @@ static bool rewriteMemberAttrs(RewriteState& state, SyntaxReference& sr, AnchorS
 
 	bool anyRewrite = updateBindings != nullptr;
 
-	RawSyntaxReference rsr = sr;
-
 	if(attrs->inheritFromExprs){
 		for(auto& def : *attrs->inheritFromExprs.get()){
-			rsr.expression = def;
-			uint32_t pos = detachedRewrite(state, rsr);
+			uint32_t pos = detachedRewrite(state, sr.rawWithExpression(def));
 			if(pos != 0xFFFFFFFFu){
 				// Good enough but... aaarghhhh.
-				anchors.addAnchor(pos, sr.pathLength + 1);
+				anchors.addAnchor(pos, sr.getPathLength() + 1);
 			}
 		}
 	}
@@ -329,7 +322,7 @@ static bool rewriteMemberAttrs(RewriteState& state, SyntaxReference& sr, AnchorS
 	for(auto& def : attrs->attrs.value()){
 		// For obvious reasons we do not descend to attributes we just overwrote.
 		if(updateBindings == nullptr || updateBindings->get(def.first) == nullptr){
-			anchors.addAnchor(sr.binarySearchPos(def.second.pos)->begin, sr.pathLength + 1);
+			anchors.addAnchor(sr.binarySearchPos(def.second.pos)->begin, sr.getPathLength() + 1);
 			SubexpressionFrame frame;
 			anyRewrite |= possiblyNonIsolatedRewrite(state, sr.getSubexpression(&frame, def.first), anchors);
 		}
@@ -337,15 +330,14 @@ static bool rewriteMemberAttrs(RewriteState& state, SyntaxReference& sr, AnchorS
 
 	for(uint32_t i = 0;i < attrs->dynamicAttrs->size();i++){
 		auto& dynAttr = attrs->dynamicAttrs->at(i);
-		rsr.expression = dynAttr.nameExpr;
-		uint32_t pos = detachedRewrite(state, rsr);
+		uint32_t pos = detachedRewrite(state, sr.rawWithExpression(dynAttr.nameExpr));
 		if(pos != 0xFFFFFFFFu){
-			anchors.addAnchor(pos, sr.pathLength);
+			anchors.addAnchor(pos, sr.getPathLength());
 		}
 		
 		SubexpressionFrame frame;
 		possiblyNonIsolatedRewrite(state, sr.getDynamicSubexpression(&frame, i), anchors);
-		anchors.addAnchor(sr.binarySearchPos(dynAttr.pos)->begin, sr.pathLength + 1);
+		anchors.addAnchor(sr.binarySearchPos(dynAttr.pos)->begin, sr.getPathLength() + 1);
 	}
 
 	return anyRewrite;
@@ -362,10 +354,8 @@ bool EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 	SyntaxReference root = RawSyntaxReference{
 		.origin = *info.parseResult.origin,
 		.boundary = info.parseResult.tokens,
-		.pathLength = 0,
-		.path = nullptr,
 		.expression = info.parseResult.rootExpression,
-	};
+	}.asIsolated();
 
 	isolatedRewrite(rewrite, std::move(root));
 

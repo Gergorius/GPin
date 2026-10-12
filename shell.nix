@@ -1,9 +1,9 @@
 let
 	pins = import ./pins.nix;
 in {
-	pkgs ? pins.pkgs,
+	pkgs ? pins.pkgs-stable,
 }:
-	pkgs.mkShell {
+	pkgs.mkShell.override { stdenv = pkgs.clangStdenv; } {
 		packages = with pkgs; [
 			nix
 			nix.src
@@ -11,6 +11,6 @@ in {
 			lldb
 		];
 		inputsFrom = [
-			(pkgs.callPackage ./build.nix {})
+			(pkgs.callPackage ./build.nix { inherit pkgs; }).gpin-update
 		];
 	}
