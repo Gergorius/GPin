@@ -2,17 +2,19 @@
 # This file contains several tests for whether subexpressions are correctly enumerated by gpin-update.
 
 {
+	verify = {old, new, ...}: assert (builtins.all (x: x) (builtins.attrValues (builtins.mapAttrs (name: body: body new.${name}) old.check))); "expr successfully updated";
 
-	verify = {old, new}: assert builtins.all (x: x) (builtins.attrValues (builtins.mapAttrs (name: body: body new.${name}) old.check)); "expr successfully updated";
-
-	assert_cond = assert { baba = false; update.baba = true; }.baba; "success";
-	check.assert_cond = v: v == "success";
+	assert_cond = assert { baba = false; update.baba = true; }.baba; "win";
+	check.assert_cond = v: v == "win";
 
 	assert_body = assert ([5] == [5]); { baba = a: a; update.baba = null; };
 	check.assert_body = v: v == {baba = null; update.baba = null;};
 
-	with_body = with { keke = a: a; update.keke = 15; }; { keke = keke; };
-	check.with_body = v: v.keke == 15;
+	with_attrs = with { keke = a: a; update.keke = 15; }; { keke = keke; };
+	check.with_attrs = v: v.keke == 15;
+
+	with_body = with { keke = "move"; }; { ghost = "stop"; update.ghost = keke; };
+	check.with_body = v: v == { ghost = "move"; update.ghost = "move"; };
 
 	let_attrs = let fofo = { rock = 5; update.rock = 10; }; in fofo.rock * 3;
 	check.let_attrs = v: v == 30;
@@ -26,10 +28,10 @@
 	let_body = let flag = "win"; in { wall = 5; update.wall = flag; };
 	check.let_body = v: v == { wall = "win"; update.wall = "win"; };
 
-	if_cond = if { power = false; update.power = true; }.power then "powered" else "unpowered";
+	if_cond = if { power = false; update.power = true; }.power then "powered" else "not powered";
 	check.if_cond = v: v == "powered";
 
-	if_branch_true = if { power = false; update.power = true; }.power then { rule = "move"; update.rule = "push"; } else "unpowered";
+	if_branch_true = if { power = false; update.power = true; }.power then { rule = "move"; update.rule = "push"; } else "not powered";
 	check.if_branch_true = v: v == {rule = "push"; update.rule = "push"; };
 
 	if_branch_false = if { power = true; update.power = false; }.power then "powered" else { rule = "float"; update.rule = "sink"; };
@@ -41,8 +43,8 @@
 	app_right = (x: x.jiji * 5) ({ jiji = 5; update.jiji = 15; });
 	check.app_right = v: v == 75;
 
-	attr_path_base = { water = null; update.water = "wet"; }.water;
-	check.attr_path_base = v: v == "wet";
+	attr_path_base = { water = null; update.water = "sink"; }.water;
+	check.attr_path_base = v: v == "sink";
 
 	attr_path_dynamic = { a = 1; b = 2; }.${{ name = "a"; update.name = "b";}.name};
 	check.attr_path_dynamic = v: v == 2;
@@ -56,7 +58,7 @@
 	dynamic_binding = { ${{ name = "a"; update.name = "b"; }.name} = "c"; };
 	check.dynamic_binding = v: v == {b = "c";};
 
-	dynamic_binding_value = { ${{ name = "a"; update.name = "b"; }.name} = { bird = "fly"; update.bird = "float";}; };
+	dynamic_binding_value = { ${{ name = "a"; update.name = "b"; }.name} = { bird = "fall"; update.bird = "float";}; };
 	check.dynamic_binding_value = v: v == {b.bird = "float"; b.update.bird = "float";};
 
 	inherit_from = { inherit ({ level = "float"; update.level = "move"; }) level; };

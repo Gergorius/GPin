@@ -12,11 +12,13 @@ namespace gpin{
 
 using nix::Expr;
 
-template<typename Visitor>
-decltype(auto) visitDynamicExpr(Expr* expr,Visitor&& visit){
+template<bool strict = false,typename Visitor>
+decltype(auto) visitDynamicNixExpr(Expr* expr,Visitor&& visit){
 	using namespace nix;
 
-#define CASE(Name) if(auto p = dynamic_cast<Name*>(expr)){ return std::invoke(std::forward<Visitor>(visit), p); }
+#define CASE(Name) if(strict ? typeid(Name) == typeid(*expr) : dynamic_cast<Name*>(expr) != nullptr){ return std::invoke(std::forward<Visitor>(visit), static_cast<Name*>(expr)); }
+
+	// I wonder whether clang is smart enough to convert this to a switch. Either way, I found no better solution.
 
 	CASE(ExprInt);
 	CASE(ExprFloat);
@@ -38,6 +40,7 @@ decltype(auto) visitDynamicExpr(Expr* expr,Visitor&& visit){
 	CASE(ExprOpEq);
 	CASE(ExprOpNEq);
 	CASE(ExprOpAnd);
+	CASE(ExprOpOr);
 	CASE(ExprOpImpl);
 	CASE(ExprOpConcatLists);
 	CASE(ExprOpUpdate);
@@ -60,9 +63,9 @@ namespace{
 	};
 }
 
-template<typename Visitor>
-decltype(auto) visitDynamicExpr(const Expr* expr,Visitor&& visit){
-	return visitDynamicExpr(const_cast<Expr*>(expr), ConstVisitor<Visitor>{std::forward<Visitor>(visit)});
+template<bool strict = false,typename Visitor>
+decltype(auto) visitDynamicNixExpr(const Expr* expr,Visitor&& visit){
+	return visitDynamicNixExpr<strict>(const_cast<Expr*>(expr), ConstVisitor<Visitor>{std::forward<Visitor>(visit)});
 }
 
 #define VSUB_FUN(Name) template<typename Visitor> bool visitSubexprs(nix::Name* p,Visitor&& visit)
@@ -156,6 +159,7 @@ VSUB_FUN(ExprOpNot){
 VSUB_FUN(ExprOpEq) BINOP;
 VSUB_FUN(ExprOpNEq) BINOP;
 VSUB_FUN(ExprOpAnd) BINOP;
+VSUB_FUN(ExprOpOr) BINOP;
 VSUB_FUN(ExprOpImpl) BINOP;
 VSUB_FUN(ExprOpConcatLists) BINOP;
 VSUB_FUN(ExprOpUpdate) BINOP;
