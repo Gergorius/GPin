@@ -22,6 +22,7 @@
 #include <boost/unordered/concurrent_flat_map.hpp>
 #include <ostream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace gpin{
@@ -83,18 +84,22 @@ Value* RecordedExprAttrs::maybeThunk(EvalState& state, Env& env){
 #define RF return false
 
 struct RelocatingVisitor{
+	bool operator()(nix::Expr* ex) const{
+		throw nix::ParseError("Unknown expression type: %1%", typeid(*ex).name());
+	}
 #ifdef UPDATE_USE_RELOCATION
 	nix::Exprs& exprs;
 	RelocatingVisitor(nix::Exprs& e): exprs(e){}
-	bool operator()(nix::Expr*) const{ RF; }
 	template<typename T>
 	bool operator()(T* expr) const{
 		expr = exprs.add<T>(std::move(*expr));
-		visitSubexprs(expr,[&](nix::Expr* expr){ visitDynamicExpr(expr, *this); RF; });
+		visitSubexprs(expr,[&](nix::Expr* expr){ visitDynamicNixExpr<true>(expr, *this); RF; });
 		RF;
 	}
 #else
-	bool operator()(nix::Expr*) const{ RF; }
+	template<typename T>
+	requires(!std::is_same_v<T, nix::Expr>)
+	bool operator()(T* expr) const{ RF; }
 	RelocatingVisitor(nix::Exprs& e){}
 #endif
 };
@@ -117,7 +122,8 @@ struct ObtrusiveVisitor : private RelocatingVisitor{
 	SELF_REPLACE(ExprInheritFrom);
 	SELF_REPLACE(ExprBlackHole);
 	template<typename T>
-	bool operator()(T*& op) const{
+	requires(!std::is_same_v<T, nix::Expr>)
+	bool operator()(T* op) const{
 		using TR = typename replacement<T>::type;
 #ifdef UPDATE_USE_RELOCATION
 		TR* ap = rv().exprs.add<TR>(std::move(*op));
@@ -126,16 +132,16 @@ struct ObtrusiveVisitor : private RelocatingVisitor{
 		TR* ap = obtrudeAsGreedy<T,TR>(op);
 #endif
 		if constexpr(std::is_same_v<T, nix::ExprLambda>){
-			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicExpr(expr, rv()); RF; });
+			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicNixExpr<true>(expr, rv()); RF; });
 		}else{
-			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicExpr(expr, *this); RF; });
+			visitSubexprs(ap, [&](nix::Expr* expr){ visitDynamicNixExpr<true>(expr, *this); RF; });
 		}
 		RF;
 	}
 };
 
 nix::Value* processParseResult(EvalStateForUpdate& state, SourceInfo& info){
-	visitDynamicExpr(info.parseResult.rootExpression, ObtrusiveVisitor{state.mem.exprs});
+	visitDynamicNixExpr<true>(info.parseResult.rootExpression, ObtrusiveVisitor{state.mem.exprs});
 	info.parseResult.rootExpression->bindVars(state, state.staticBaseEnv);
 	nix::Value* v = info.parseResult.rootExpression->maybeThunk(state,state.baseEnv);
 	info.value = nix::allocRootValue(v);
@@ -238,7 +244,7 @@ static uint32_t detachedRewrite(RewriteState& state, RawSyntaxReference rsr){
 		}
 	}
 	uint32_t acc = 0xFFFFFFFFu;
-	visitDynamicExpr(rsr.expression, mkSubexprs([&](nix::Expr* ex){
+	visitDynamicNixExpr(rsr.expression, mkSubexprs([&](nix::Expr* ex){
 		acc = std::min(detachedRewrite(state, rsr.rawWithExpression(ex)), acc);
 		RF;
 	}));
@@ -255,7 +261,7 @@ static void isolatedRewrite(RewriteState& state, SyntaxReference sr){
 			isolatedRewrite(state, sr.getBody());
 		}
 	}else{
-		visitDynamicExpr(sr.expression, mkSubexprs([&](nix::Expr* ex){
+		visitDynamicNixExpr(sr.expression, mkSubexprs([&](nix::Expr* ex){
 			detachedRewrite(state, sr.rawWithExpression(ex));
 			RF;
 		}));
