@@ -27,6 +27,22 @@ static void prepareParseData(std::string_view input,std::vector<char>& pdata){
 	pdata.push_back('\0');
 }
 
+const NixToken* binarySearchToken(std::span<const NixToken> tokens,uint32_t pos){
+	uint32_t begin = 0;
+	uint32_t end = tokens.size();
+	while(begin != end){
+		uint32_t half = (begin + end) / 2;
+		if(pos < tokens[half].begin){
+			end = half;
+		}else if(tokens[half].end <= pos){
+			begin = half + 1;
+		}else{
+			return tokens.data() + half;
+		}
+	}
+	return tokens.data() + begin;
+}
+
 struct yyscanner{
 	std::optional<yyscan_t> payload;
 	yyscanner(){}

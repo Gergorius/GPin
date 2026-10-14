@@ -61,7 +61,7 @@ private:
 public:
 	nix::EvalState& state;
 	inline NixValueInternPool(nix::EvalState& s): state(s){}
-	// Interns the value, including all subvalues. Returns a pointer to the canonical value. If two values x and y are equal according to NixValueComparer then intern(x) == intern(y). It is important that neither the argument nor the return value nor any sub-values reachable from them may be modified in any way for the rest of the pool's lifetime.
+	// Interns the value, including all subvalues. Returns a pointer to the canonical value. If two pointers x and y are equal according to NixValueComparer then `intern(x) == intern(y)`. This method may modify the argument value in any way as long as such modification is not observable to nix code. These modifications may take place even if `intern` returns a different result. Modifying either the argument or return value of the intern pool, any subvalues, or interning them to a different pool while this pool is alive leads to undefined behavior.
 	const nix::Value* intern(nix::Value* value);
 };
 
@@ -73,8 +73,8 @@ void forceForHashing(nix::EvalState& state, nix::Value& value);
 // Ensures the value tree contains no thunks whatsoever. This is essentially a more aggressive deepForce.
 void deeperForce(nix::EvalState& state, nix::Value& value);
 
-// Helper class implementing some nix external value virtual functions.
-struct AbstractExternalValue : nix::ExternalValueBase{
+// Hashable external value. The hashing and equality functions in this header by default consider nix external values equal if their pointers are equal. (Due to their default operator== implementation being a bad joke.) ...unless they also derive from this class, in which case the equality operator and `getHashCode` method are used. Any class deriving from this MUST ensure operator== is reflexive, transitive, symmetric and substitutable and that equality of the hash code respects equality of objects. In all cases. We mean ALL cases.
+struct HashableExternalValue : nix::ExternalValueBase{
 	inline virtual std::ostream& print(std::ostream& str) const override{
 		return str << "<abstract external value>";
 	}
@@ -84,8 +84,11 @@ struct AbstractExternalValue : nix::ExternalValueBase{
 	inline virtual std::string typeOf() const override{
 		return "external";
 	}
-	virtual bool operator==(const ExternalValueBase& b) const noexcept override{
+	virtual bool operator==(const nix::ExternalValueBase& b) const noexcept override{
 		return this == &b;
+	}
+	virtual uint32_t getHashCode() const noexcept{
+		return std::hash<const void*>{}(this);
 	}
 };
 

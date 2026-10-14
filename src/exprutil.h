@@ -68,7 +68,7 @@ decltype(auto) visitDynamicNixExpr(const Expr* expr,Visitor&& visit){
 	return visitDynamicNixExpr<strict>(const_cast<Expr*>(expr), ConstVisitor<Visitor>{std::forward<Visitor>(visit)});
 }
 
-#define VSUB_FUN(Name) template<typename Visitor> bool visitSubexprs(nix::Name* p,Visitor&& visit)
+#define VSUB_FUN(Name) template<typename Visitor> bool visitSubexprs(const nix::Name* p,Visitor&& visit)
 
 VSUB_FUN(ExprInt){ return false; }
 VSUB_FUN(ExprFloat){ return false; }

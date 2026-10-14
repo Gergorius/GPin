@@ -4,7 +4,9 @@ find_package(PkgConfig REQUIRED)
 
 project(GPin)
 
-add_compile_options(-fstandalone-debug)
+if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
+	add_compile_options(-fstandalone-debug)
+endif()
 
 add_library(gpin-natives
 	SHARED
