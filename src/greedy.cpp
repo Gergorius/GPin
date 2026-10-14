@@ -72,7 +72,7 @@ struct ExprValue : public Expr{
 };
 
 template<typename T>
-struct ExprThunk : AbstractExternalValue{
+struct ExprThunk : HashableExternalValue{
 	const T* internal;
 	Env* env;
 	ExprThunk(){}

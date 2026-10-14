@@ -1,9 +1,16 @@
 
 #include "treewalk.h"
 #include "altparse.h"
+#include "exprutil.h"
+#include <cstddef>
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/value.hh>
+#include <nix/util/error.hh>
 #include <nix/util/pos-idx.hh>
+#include <nix/util/util.hh>
+#include <type_traits>
+#include <variant>
+#include <vector>
 
 namespace gpin{
 
@@ -66,6 +73,107 @@ bool maybeWalkToClosingToken(const NixToken*& ptr){
 			return true;
 	}
 	return false;
+}
+
+namespace{
+	struct PositionFinder{
+		nix::PosIdx pos = nix::noPos;
+		bool operator()(const nix::ExprLet* exprLet){
+			// Otherwise we miss the position stored in the attrs.
+			return visitSubexprs(exprLet->attrs,[this](nix::Expr* e){ return visitDynamicNixExpr(e, *this); })
+				|| visitDynamicNixExpr(exprLet->body, *this);
+		}
+		bool operator()(const nix::ExprAttrs* expr){
+			pos = expr->getPos();
+			if(pos != nix::noPos){
+				return true;
+			}
+			for(auto& binding : expr->attrs.value()){
+				pos = binding.second.pos;
+				if(pos != nix::noPos){
+					return true;
+				}
+			}
+			for(auto& binding : expr->dynamicAttrs.value()){
+				pos = binding.pos;
+				if(pos != nix::noPos){
+					return true;
+				}
+			}
+			return visitSubexprs(expr,[this](const nix::Expr* e){ return visitDynamicNixExpr(e, *this); });
+		}
+		template<typename T>
+		bool operator()(const T* expr){
+			pos = expr->getPos();
+			if(pos != nix::noPos){
+				return true;
+			}
+			if constexpr(std::is_same_v<nix::Expr, std::remove_cvref_t<T>>){
+				return false;
+			}else{
+				return visitSubexprs(expr,[this](const nix::Expr* e){ return visitDynamicNixExpr(e, *this); });
+			}
+		}
+	};
+}
+
+nix::PosIdx findPosition(const nix::Expr* expression){
+	PositionFinder finder;
+	visitDynamicNixExpr(expression, finder);
+	return finder.pos;
+}
+
+AttrsOpenInfo AttrsOpenInfo::nextOpen(const NixToken* token){
+	while(token->type != '{' && token->type != NixToken::kind_type::LET){
+		token++;
+	}
+	return AttrsOpenInfo(token);
+}
+
+std::variant<InheritInfo,InheritFromInfo,BindingInfo,AttrsCloseInfo> AttrsSyntaxBase::getNext() const{
+	const NixToken* cursor = last + 1;
+	if(cursor->type == '}' || cursor->type == NixToken::kind_type::IN_KW){
+		return AttrsCloseInfo(cursor);
+	}
+	const NixToken* begin = cursor;
+	if(cursor->type == NixToken::kind_type::INHERIT){
+		cursor++;
+		if(maybeWalkToClosingToken(cursor)){ // Is this inherit-from?
+			cursor++;
+			const NixToken* attrsBegin = cursor;
+			walkToToken(cursor, ';');
+			return InheritFromInfo{
+				AttrsDeclarationInfo{begin, cursor},
+				attrsBegin,
+			};
+		}else{
+			walkToToken(cursor, ';');
+			return InheritInfo{AttrsDeclarationInfo{begin,cursor}};
+		}
+	}else{
+		walkToToken(cursor, '=','.');
+		const NixToken* doteq = cursor;
+		walkToToken(cursor,';');
+		return BindingInfo{
+			AttrsDeclarationInfo{begin, cursor},
+			begin,
+			doteq
+		};
+	}
+}
+
+BindingInfo BindingInfo::getMember() const{
+	const NixToken* cursor = doteq + 1;
+	walkToToken(cursor, '=', '.');
+	return BindingInfo(
+		AttrsDeclarationInfo{*this},
+		doteq + 1,
+		cursor
+	);
+}
+
+AttrsOpenInfo BindingInfo::getAttrsValue() const{
+	return AttrsOpenInfo::nextOpen(doteq + 1);
 }
 
 struct CollectPositions{
@@ -275,38 +383,81 @@ SyntaxReference SyntaxReference::getDynamicSubexpression(SubexpressionFrame* fra
 	);
 }
 
-std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContaining(nix::EvalState& state,const std::set<uint32_t>& positions) const{
+std::optional<SyntaxReference> SyntaxReference::getInheritFromExpression(uint32_t index){
+	nix::ExprAttrs* expr = attrs();
+	nix::Expr* fromExpr = expr->inheritFromExprs->at(index);
+	nix::PosIdx pos = findPosition(fromExpr);
+	if(pos == nix::noPos){
+		// This is a last resort!
+		for(auto& binding : *expr->attrs){
+			if(binding.second.chooseByKind(false, false, true)){
+				nix::ExprSelect* select = dynamic_cast<nix::ExprSelect*>(binding.second.e);
+				nix::ExprInheritFrom* ifrom = select == nullptr ? nullptr : dynamic_cast<nix::ExprInheritFrom*>(select->e);
+				if(ifrom != nullptr && ifrom->displ == index){
+					pos = ifrom->pos;
+					break;
+				}
+			}
+		}
+	}
+	if(pos == nix::noPos){
+		// I find it unlikely that this expression, which contains no attribute sets, no variables, no operators and no selectors evaluates to bindings. At least we can be certain that this is a constant expression whose value is unaffected by updating. However, this does pose a problem: We cannot identify the declaration containing the expression. Not even if we go through every single declaration individually. And therefore we cannot anchor it and it will be erased.
+		return std::nullopt;
+	}
+	uint32_t resolvedPosition = resolvePos(pos);
+	std::vector<AttributeDeclaration> dec = findMemberDeclarationsContaining({resolvedPosition});
+	InheritFromInfo& info = std::get<InheritFromInfo>(dec.at(0));
+	return SyntaxReference(
+		RawSyntaxReference{
+			.origin = origin,
+			.boundary = info.getFromExprBoundary(),
+			.expression = fromExpr
+		},
+		0,
+		nullptr
+	);
+}
+
+std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContaining(const std::set<uint32_t>& positions) const{
 	if(isIsolated()){
 		std::vector<AttributeDeclaration> vec;
-		traverseAttrsDeclarations(boundary, [&](uint32_t index,const auto& def){
-			auto itr = positions.lower_bound(def.begin->begin);
-			if(itr != positions.end() && *itr < def.endsemi->end){
-				vec.push_back(def);
-			}
-			return false;
-		});
+		AttrsSyntaxBase base = AttrsOpenInfo::nextOpen(boundary.data());
+		bool end = false;
+		while(!end){
+			std::visit(nix::overloaded{
+				[&](const AttrsCloseInfo& p) {
+					end = true;
+				},
+				[&](const auto& b) {
+					auto itr = positions.lower_bound(b.getFirst()->begin);
+					if(itr != positions.end() && *itr < b.getLast()->end){
+						vec.push_back(b);
+					}
+					base = b;
+				},
+			}, base.getNext());
+		}
 		return vec;
 	}else{
-		std::vector<AttributeDeclaration> pvec = getParent().findMemberDeclarationsContaining(state,positions);
+		std::vector<AttributeDeclaration> pvec = getParent().findMemberDeclarationsContaining(positions);
 		std::vector<AttributeDeclaration> vec;
 		for(AttributeDeclaration d : pvec){
 			if(std::holds_alternative<BindingInfo>(d)){
 				const BindingInfo& info = std::get<BindingInfo>(d);
-				switch(info.doteq->type){
+				switch(info.getDoteq()->type){
 					case '=':{
 						SyntaxReference partition = RawSyntaxReference{
 							.origin = origin,
-							.boundary = {info.doteq + 1, info.endsemi},
+							.boundary = {info.getDoteq() + 1, info.getLast()},
 							.expression = expression,
 						}.asIsolated();
-						vec.append_range(partition.findMemberDeclarationsContaining(state,positions));
+						vec.append_range(partition.findMemberDeclarationsContaining(positions));
 						}break;
 					case '.':
-						vec.push_back(info.next());
+						vec.push_back(info.getMember());
 						break;
 					default:
-						state.error<nix::EvalError>("Encountered a binding that is neither dot nor eq.").debugThrow();
-						break;
+						throw nix::Error("Encountered a binding that is neither dot nor eq.");
 				}
 			}
 		}
@@ -315,7 +466,7 @@ std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContain
 }
 
 // Find every place where this non-isolated value is declared! MAY miss empty declarations.
-std::vector<AttributeDeclaration> SyntaxReference::findAllDeclarations(nix::EvalState& state) const{
+std::vector<AttributeDeclaration> SyntaxReference::findAllDeclarations() const{
 	std::set<uint32_t> positions{};
 
 	nix::ExprAttrs* parent = path->getAttrs();
@@ -339,7 +490,7 @@ std::vector<AttributeDeclaration> SyntaxReference::findAllDeclarations(nix::Eval
 		}
 		visitAttributeDefinitions(attrs, CollectPositions{origin, positions});
 	}
-	return getParent().findMemberDeclarationsContaining(state,positions);
+	return getParent().findMemberDeclarationsContaining(positions);
 }
 
 

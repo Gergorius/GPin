@@ -33,16 +33,17 @@ private:
 	std::span<const char> content;
 #endif
 public:
-	NixToken() = default;
-	NixToken(uint32_t b): begin(b){}
-	NixToken(kind_utype t,uint32_t b,uint32_t e): type(t), begin(b), end(e){}
 #ifndef NDEBUG
 	NixToken(kind_utype t,uint32_t b,uint32_t e,std::string_view s): type(t), begin(b), end(e), content(s){}
+#else
+	NixToken(kind_utype t,uint32_t b,uint32_t e): type(t), begin(b), end(e){}
 #endif
 	std::weak_ordering operator<=>(const NixToken& that) const{
 		return this->begin <=> that.begin;
 	}
 };
+
+const NixToken* binarySearchToken(std::span<const NixToken> token,uint32_t pos);
 
 struct ParseResult{
 	nix::Expr* rootExpression;

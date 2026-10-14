@@ -43,40 +43,99 @@ bool maybeWalkToClosingToken(const NixToken*& ptr);
 // Walk the pointer until one of the specified list of token types is encountered. Tokens within brackets are skipped!
 void walkToTokens(const NixToken*& ptr,std::initializer_list<NixToken::kind_utype> types);
 
+// Traverse the expression tree and try to find a position.
+nix::PosIdx findPosition(const nix::Expr* expression);
+
 // Walk the pointer until one of the specified list of token types is encountered. Tokens within brackets are skipped!
 #define walkToToken(ptr,...) walkToTokens(ptr,{__VA_ARGS__})
 
-struct AttrsDeclarationInfo{
-	// First token of the attribute.
-	const NixToken *begin;
-	// The semicolon at the end of the attribute.
-	const NixToken *endsemi;
+class AttrsDeclarationInfo;
+class InheritInfo;
+class InheritFromInfo;
+class BindingInfo;
+class AttrsCloseInfo;
+class AttrsOpenInfo;
+
+#define FRIENDS \
+friend class AttrsDeclarationInfo;\
+friend class AttrsSyntaxBase0;\
+friend class AttrsSyntaxBase;\
+friend class InheritInfo;\
+friend class InheritFromInfo;\
+friend class BindingInfo;\
+friend class AttrsCloseInfo;\
+friend class AttrsOpenInfo;\
+friend class TreewalkFirstHolder;
+
+class AttrsCloseInfo{
+	FRIENDS;
+	const NixToken* bracket;
+	inline AttrsCloseInfo(const NixToken* b): bracket(b){}
+public:
+	inline const NixToken* getBracket(){ return bracket; }
 };
 
-struct InheritInfo : AttrsDeclarationInfo{
-	const NixToken* getAttrsBegin(){ return begin + 1; }
+class AttrsSyntaxBase0{
+	FRIENDS;
+	const NixToken* first;
+	inline AttrsSyntaxBase0(const NixToken* f): first(f){};
+public:
+	inline const NixToken* getFirst() const { return first; }
 };
 
-struct InheritFromInfo : AttrsDeclarationInfo{
+class AttrsSyntaxBase{
+	FRIENDS;
+	const NixToken* last;
+	inline AttrsSyntaxBase(const NixToken* l): last(l){}
+public:
+	// Returns the last token part of this syntax. The LAST. Not one past the last. This is typically a semicolon, but could be something different.
+	inline const NixToken* getLast() const { return last; }
+	std::variant<InheritInfo,InheritFromInfo,BindingInfo,AttrsCloseInfo> getNext() const;
+};
+
+class AttrsOpenInfo : public AttrsSyntaxBase{
+	FRIENDS;
+	AttrsOpenInfo(const NixToken* t): AttrsSyntaxBase(t){}
+public:
+	inline const NixToken* getOpenBracket(){ return last; }
+	static AttrsOpenInfo nextOpen(const NixToken* token);
+};
+
+class AttrsDeclarationInfo : public AttrsSyntaxBase0, public AttrsSyntaxBase{
+	FRIENDS;
+	inline AttrsDeclarationInfo(const NixToken* b,const NixToken* e): AttrsSyntaxBase0(b), AttrsSyntaxBase(e){}
+};
+
+class InheritInfo : public AttrsDeclarationInfo{
+	FRIENDS;
+public:
+	inline const NixToken* getAttrsBegin() const { return first + 1; }
+};
+
+class InheritFromInfo : public AttrsDeclarationInfo{
+	FRIENDS;
 	const NixToken *attrsBegin;
-	const NixToken* getAttrsBegin(){ return attrsBegin; }
+	inline InheritFromInfo(const AttrsDeclarationInfo& x, const NixToken* a): AttrsDeclarationInfo(x), attrsBegin(a){}
+public:
+	inline std::span<const NixToken> getFromExprBoundary() const { return {first + 1, attrsBegin };}
+	inline const NixToken* getAttrsBegin() const { return attrsBegin; }
 };
 
-struct BindingInfo : AttrsDeclarationInfo{
+using AttributeDeclaration = std::variant<BindingInfo,InheritInfo,InheritFromInfo>;
+
+class BindingInfo : public AttrsDeclarationInfo{
+	FRIENDS;
 	const NixToken* name;
 	const NixToken* doteq;
-	inline BindingInfo next() const{
-		const NixToken* cursor = doteq + 1;
-		walkToToken(cursor, '=', '.');
-		return BindingInfo{
-			AttrsDeclarationInfo{begin, endsemi},
-			doteq + 1,
-			cursor
-		};
-	}
+	inline BindingInfo(const AttrsDeclarationInfo& x, const NixToken* n, const NixToken* d): AttrsDeclarationInfo(x), name(n), doteq(d){}
+public:
+	inline const NixToken* getNameBegin() const { return name; }
+	inline const NixToken* getDoteq() const { return doteq; }
+	BindingInfo getMember() const;
+	AttrsOpenInfo getAttrsValue() const;
 };
 
-using AttributeDeclaration = std::variant<InheritInfo,InheritFromInfo,BindingInfo>;
+#undef FRIENDS
 
 struct SyntaxReference;
 
@@ -85,9 +144,12 @@ struct RawSyntaxReference{
 	const nix::PosTable::Origin& origin;
 	std::span<const NixToken> boundary;
 	nix::Expr* const expression;
+	inline uint32_t resolvePos(nix::PosIdx pos) const{
+		return origin.offsetOf(pos);
+	}
 	// Find the token containing the position.
 	inline const NixToken* binarySearchPos(nix::PosIdx pos) const{
-		return &*std::lower_bound(boundary.begin(),boundary.end(),NixToken(origin.offsetOf(pos)));
+		return binarySearchToken(boundary, origin.offsetOf(pos));
 	}
 	// Start offset of first token.
 	inline uint32_t beginOffset() const{
@@ -162,61 +224,14 @@ public:
 	// Get a reference to a subexpression of this ExprAttrs or ExprLet which may not be dynamic.
 	SyntaxReference getSubexpression(SubexpressionFrame* frame,nix::Symbol name);
 	SyntaxReference getDynamicSubexpression(SubexpressionFrame* frame,uint32_t index);
+	// Find the inherit-from expression at the specific index.
+	std::optional<SyntaxReference> getInheritFromExpression(uint32_t index);
 	// Find all member declarations that contain at least one position from a set of positions.
-	std::vector<AttributeDeclaration> findMemberDeclarationsContaining(nix::EvalState& state,const std::set<uint32_t>& positions) const;
+	std::vector<AttributeDeclaration> findMemberDeclarationsContaining(const std::set<uint32_t>& positions) const;
 	// Find every place where this non-isolated value is declared! MAY miss empty declarations.
-	std::vector<AttributeDeclaration> findAllDeclarations(nix::EvalState& state) const;
+	std::vector<AttributeDeclaration> findAllDeclarations() const;
 };
 
 inline SyntaxReference RawSyntaxReference::asIsolated(){ return SyntaxReference(*this); }
-
-template<typename Visitor>
-inline bool traverseAttrsDeclarations(std::span<const NixToken> boundary,const Visitor& visit){
-	uint32_t index = 0;
-	const NixToken* cursor = boundary.data();
-	while(cursor->type != '{' && cursor->type != NixToken::kind_type::LET){
-		cursor++;
-	}
-	cursor++;
-	while(cursor->type != '}' && cursor->type != NixToken::kind_type::IN_KW){
-		const NixToken* begin = cursor;
-		if(cursor->type == NixToken::kind_type::INHERIT){
-			cursor++;
-			if(maybeWalkToClosingToken(cursor)){ // Is this inherit-from?
-				cursor++;
-				const NixToken* attrsBegin = cursor;
-				walkToToken(cursor, ';');
-				if(visit(index,InheritFromInfo{
-					AttrsDeclarationInfo{begin, cursor},
-					attrsBegin,
-				})){
-					return true;
-				}
-				cursor++;
-			}else{
-				walkToToken(cursor, ';');
-				if(visit(index,InheritInfo{
-					AttrsDeclarationInfo{begin,cursor},
-				})){
-					return true;
-				}
-				cursor++;
-			}
-		}else{
-			walkToToken(cursor, '=','.');
-			const NixToken* doteq = cursor;
-			walkToToken(cursor,';');
-			if(visit(index,BindingInfo{
-				AttrsDeclarationInfo{begin, cursor},
-				begin,
-				doteq
-			})){
-				return true;
-			}
-			cursor++;
-		}
-	}
-	return false;
-}
 
 }

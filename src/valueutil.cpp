@@ -52,9 +52,14 @@ size_t NixValueComparer::hash(const nix::Value* vptr){
 		case nix::tFloat:
 			sum += std::hash<nix::NixFloat>{}(vptr->fpoint());
 			break;
-		case nix::tExternal:
-			sum = sum + std::hash<std::string>{}(vptr->external()->typeOf());
-			break;
+		case nix::tExternal:{
+			nix::ExternalValueBase* ext = vptr->external();
+			if(auto* hev = dynamic_cast<HashableExternalValue*>(ext)){
+				sum = sum + hev->getHashCode();
+			}else{
+				sum = sum + std::hash<const void*>{}(ext);
+			}
+			}break;
 		case nix::tPrimOp:
 			sum = sum + std::hash<const void*>{}(vptr->primOp());
 			break;
@@ -217,7 +222,15 @@ static bool eqValues(VPtr l,VPtr r,std::conditional_t<doForce, nix::EvalState&, 
 			case nix::tLambda: return CHK(->lambda().env) && CHK(->lambda().fun);
 			case nix::tPrimOp: return CHK(->primOp());
 			case nix::tPrimOpApp: return REC(->primOpApp().left) && REC(->primOpApp().right);
-			case nix::tExternal: return *(l->external()) == *(r->external());
+			case nix::tExternal:{
+				nix::ExternalValueBase* le = l->external();
+				nix::ExternalValueBase* re = r->external();
+				if(dynamic_cast<HashableExternalValue*>(le) && dynamic_cast<HashableExternalValue*>(re)){
+					return (*le) == (*re);
+				}else{
+					return le == re;
+				}
+			}break;
 			case nix::tFailed:
 			case nix::tUninitialized:
 			case nix::tNumberOfInternalTypes:
@@ -242,7 +255,6 @@ bool NixValueComparer::eq(const nix::Value* l,const nix::Value* r){ return eqVal
 bool LazyNixValueComparer::eq(nix::Value* l,nix::Value* r) const { return eqValues<true,nix::Value*>(l,r,state); }
 
 void deeperForce(nix::EvalState& state, nix::Value& value){
-
 	nix::Value* v = &value;
 
 	std::unordered_set<nix::Value*> seen;
@@ -395,7 +407,7 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 			p->value->mkAttrs(newBindings);
 		}break;
 
-		// Deduplicating values that do not compare equal to themselves produces an observable side effect.
+		// Deduplicating values that do not compare equal to themselves (according to nix! Not according to us.) produces an observable side effect.
 		
 		case nix::tLambda:
 		case nix::tPrimOp:
