@@ -134,7 +134,7 @@ begin:
 		case nix::tPath:
 		case nix::tNumberOfInternalTypes:
 			break;
-    }
+	}
 }
 
 static bool stringContextEq(const nix::Value* l,const nix::Value* r){
@@ -260,8 +260,8 @@ void deeperForce(nix::EvalState& state, nix::Value& value){
 	std::unordered_set<nix::Value*> seen;
 
 	[&state,&seen](this const auto & recurse, nix::Value* v){
-        auto _cd = state.addCallDepth(v->determinePos(nix::noPos));
-		
+		auto _cd = state.addCallDepth(v->determinePos(nix::noPos));
+
 		if(!seen.insert(v).second)
 			return;
 
@@ -270,7 +270,7 @@ void deeperForce(nix::EvalState& state, nix::Value& value){
 		switch(internalType(*v)){
 			case nix::tAttrs:
 				for(auto& binding : *v->attrs()){
-                	try{
+					try{
 						recurse(binding.value);
 					}catch(nix::Error& e){
 						e.addTrace(state.positions[binding.pos], nix::HintFmt("while evaluating the attribute '%1%'", state.symbols[binding.name]));

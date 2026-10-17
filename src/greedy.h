@@ -49,6 +49,8 @@ struct Greedy<nix::name> : nix::name{ \
 };
 #define MK_GREEDY(name, ...) MK_RAW_GREEDY(name)
 #define MK_EVAL_GREEDY(name) MK_RAW_GREEDY(name)
+#else
+using namespace mod;
 #endif
 
 // These expressions are fully evaluated when maybeThunk is called.
@@ -58,26 +60,36 @@ MK_EVAL_GREEDY(ExprList);
 MK_EVAL_GREEDY(ExprLambda); // Lacks a maybeThunk implementation.
 MK_EVAL_GREEDY(ExprPos);    // Lacks a maybeThunk implementation.
 
-// ExprCall is special
+// These expressions have specialised implementations
 
 MK_RAW_GREEDY(ExprCall); // Converted to a series of app thunks.
+MK_RAW_GREEDY(ExprAssert); // Uses our special thunk sauce but has a special case for equality.
 
 // These expressions are copied with the body being replaced with a pseudo-expression that calls the maybeThunk of the actual body. The copy is then evaluatd.
 
 MK_RAW_GREEDY(ExprLet);
 MK_RAW_GREEDY(ExprWith);
 
-// These expressions do not have nix thunks forcing us to... sigh... make a custom thunk for them. The custom thunk is a primitive operation call with a custom primitive operation and a custom external value as the first argument. Said external value is gc managed and stores everything we need. When the thunk is forced, we construct a temporary copy of the expression object and replace it's subexpression pointers with temporary expressions that evaluate to the value thunks.
+// These expressions do not have nix thunks forcing us to... sigh... make a custom thunk for them. The custom thunk is a primitive operation call with a custom primitive operation and a custom external value as the first argument. Said external value is gc managed and stores a reference to the env and the original expression. When the thunk is forced, we construct a temporary copy of the expression object and replace it's subexpression pointers with temporary expressions that evaluate to the value thunks.
 
-MK_GREEDY(ExprIf, ValueModifier<&ExprIf::cond>, ValueModifier<&ExprIf::then>, ValueModifier<&ExprIf::else_>);
-MK_GREEDY(ExprSelect, ValueModifier<&ExprSelect::e>, SpanModifier<sd_handle{}, symbol_empty{}, ValueModifier<&nix::AttrName::expr>>, ValueModifier<&ExprSelect::def>);
-MK_GREEDY(ExprOpHasAttr, ValueModifier<&ExprOpHasAttr::e>, SpanModifier<&ExprOpHasAttr::attrPath, symbol_empty{}, ValueModifier<&nix::AttrName::expr>>);
-MK_GREEDY(ExprAssert, ValueModifier<&ExprAssert::cond>, ValueModifier<&ExprAssert::body>);
-MK_GREEDY(ExprOpNot, ValueModifier<&ExprOpNot::e>);
+MK_GREEDY(ExprIf, Tuple<
+	Member<&ExprIf::cond>,
+	Member<&ExprIf::then>,
+	Member<&ExprIf::else_>
+>);
+MK_GREEDY(ExprSelect, Tuple<
+	Member<&ExprSelect::e>,
+	ProxiedSpan<&ExprSelect::attrPathStart,&ExprSelect::nAttrPath,Filter<&symbol_empty,Member<&nix::AttrName::expr>>>,
+	Member<&ExprSelect::def>
+>);
+MK_GREEDY(ExprOpHasAttr, Tuple<
+	Member<&ExprOpHasAttr::e>,
+	Member<&ExprOpHasAttr::attrPath,Span<Filter<&symbol_empty,Member<&nix::AttrName::expr>>>>
+>)
+MK_GREEDY(ExprOpNot, Member<&ExprOpNot::e>);
+MK_GREEDY(ExprConcatStrings, Member<&ExprConcatStrings::es,Span<Member<&std::pair<nix::PosIdx,nix::Expr*>::second>>>)
 
-MK_GREEDY(ExprConcatStrings, SpanModifier<&ExprConcatStrings::es, always_true{}, ValueModifier<&std::pair<nix::PosIdx,Expr*>::second>>);
-
-#define MK_GREEDY_BINOP(name) MK_GREEDY(name,ValueModifier<&nix::name::e1>, ValueModifier<&nix::name::e2>)
+#define MK_GREEDY_BINOP(name) MK_GREEDY(name,Tuple<Member<&nix::name::e1>, Member<&nix::name::e2>>)
 
 MK_GREEDY_BINOP(ExprOpEq);
 MK_GREEDY_BINOP(ExprOpNEq);

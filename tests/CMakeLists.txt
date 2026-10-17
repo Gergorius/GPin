@@ -17,7 +17,7 @@ function(makeTrivialTest name file)
 	add_test(NAME "${name}/run" COMMAND $<TARGET_FILE:gpin-update> ${test_file} --extra-experimental-features "pipe-operators")
 	set_tests_properties("${name}/run" PROPERTIES
 		FIXTURES_REQUIRED "setup_fixture_${name}"
-		FIXTURES_SETUP "verify_fixture_${name}"
+		FIXTURES_SETUP "run_fixture_${name}"
 		ENVIRONMENT "NIX_STATE_DIR=${TEST_OUTPUT_DIR}/${name}/nix-state;NIX_LOG_DIR=${TEST_OUTPUT_DIR}/${name}/nix-log"
 	)
 
@@ -27,12 +27,13 @@ function(makeTrivialTest name file)
 			nix-instantiate --eval --strict --raw
 			--arg old "import ${file}"
 			--arg new "import ${test_file}"
-			--expr "{old, new}@args: old.verify args"
+			--argstr testname ${name}
+			--expr "{old, ...}@args: old.verify args"
 			--extra-experimental-features "pipe-operators"
 			--show-trace
 		)
 	set_tests_properties("${name}/verify" PROPERTIES
-		FIXTURES_REQUIRED "verify_fixture_${name}"
+		FIXTURES_REQUIRED "run_fixture_${name}"
 		ENVIRONMENT "NIX_STATE_DIR=${TEST_OUTPUT_DIR}/${name}/nix-state;NIX_LOG_DIR=${TEST_OUTPUT_DIR}/${name}/nix-log"
 	)
 endfunction()

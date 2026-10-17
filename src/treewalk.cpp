@@ -2,7 +2,6 @@
 #include "treewalk.h"
 #include "altparse.h"
 #include "exprutil.h"
-#include <cstddef>
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/value.hh>
 #include <nix/util/error.hh>
@@ -81,7 +80,7 @@ namespace{
 		bool operator()(const nix::ExprLet* exprLet){
 			// Otherwise we miss the position stored in the attrs.
 			return visitSubexprs(exprLet->attrs,[this](nix::Expr* e){ return visitDynamicNixExpr(e, *this); })
-				|| visitDynamicNixExpr(exprLet->body, *this);
+			    || visitDynamicNixExpr(exprLet->body, *this);
 		}
 		bool operator()(const nix::ExprAttrs* expr){
 			pos = expr->getPos();
@@ -401,7 +400,7 @@ std::optional<SyntaxReference> SyntaxReference::getInheritFromExpression(uint32_
 		}
 	}
 	if(pos == nix::noPos){
-		// I find it unlikely that this expression, which contains no attribute sets, no variables, no operators and no selectors evaluates to bindings. At least we can be certain that this is a constant expression whose value is unaffected by updating. However, this does pose a problem: We cannot identify the declaration containing the expression. Not even if we go through every single declaration individually. And therefore we cannot anchor it and it will be erased.
+		// I find it unlikely that this expression, which contains no attribute sets, no variables, no operators and no selectors evaluates to bindings. At least we can be certain that this is a constant expression whose value is unaffected by updating. However, this does pose a problem: We cannot identify the declaration containing the expression. Not even if we go through every single declaration individually. And therefore we cannot anchor it.
 		return std::nullopt;
 	}
 	uint32_t resolvedPosition = resolvePos(pos);
