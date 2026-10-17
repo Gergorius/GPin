@@ -29,8 +29,8 @@ using nix::ref;
 using nix::Strings;
 
 struct GPinCommand : virtual nix::RootArgs, virtual nix::StoreCommand, virtual nix::MixEvalArgs, virtual nix::MixCommonArgs{
-    std::shared_ptr<nix::Store> evalStore;
-    std::shared_ptr<EvalStateForUpdate> evalState;
+	std::shared_ptr<nix::Store> evalStore;
+	std::shared_ptr<EvalStateForUpdate> evalState;
 	std::vector<std::string> targetFiles;
 	bool helpRequested = false;
 
@@ -47,7 +47,7 @@ struct GPinCommand : virtual nix::RootArgs, virtual nix::StoreCommand, virtual n
 			evalState = std::allocate_shared<EvalStateForUpdate>(traceable_allocator<EvalStateForUpdate>(), lookupPath, getEvalStore(), nix::fetchSettings, nix::evalSettings, getStore());
 			evalState->repair = repair;
 		}
-   		return ref<EvalStateForUpdate>(evalState);
+		return ref<EvalStateForUpdate>(evalState);
 	}
 	virtual void run(ref<nix::Store>) override;
 };

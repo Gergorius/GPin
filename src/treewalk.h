@@ -6,7 +6,6 @@
 #include <nix/expr/symbol-table.hh>
 #include <nix/util/pos-idx.hh>
 #include <span>
-#include <algorithm>
 
 #include <nix/expr/nixexpr.hh>
 #include <nix/util/pos-table.hh>

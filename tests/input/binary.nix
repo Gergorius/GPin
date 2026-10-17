@@ -2,7 +2,7 @@
 # Binary operators are so numerous they get their separate test.
 
 {
-	verify = {old, new, ...}: assert builtins.all (x: x) (builtins.attrValues (builtins.mapAttrs (name: body: body new.${name}) old.check)); "binary successfully updated";
+	verify = (import ../verifiers.nix).check-verify;
 
 	eq = {noun = "wall"; update.noun = "baba";} == {noun = "rock"; update.noun = "baba";};
 	check.eq = v: v == true;

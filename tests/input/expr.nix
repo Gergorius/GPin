@@ -2,7 +2,7 @@
 # This file contains several tests for whether subexpressions are correctly enumerated by gpin-update.
 
 {
-	verify = {old, new, ...}: assert (builtins.all (x: x) (builtins.attrValues (builtins.mapAttrs (name: body: body new.${name}) old.check))); "expr successfully updated";
+	verify = (import ../verifiers.nix).check-verify;
 
 	assert_cond = assert { baba = false; update.baba = true; }.baba; "win";
 	check.assert_cond = v: v == "win";

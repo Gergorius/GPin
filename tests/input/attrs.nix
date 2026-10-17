@@ -5,7 +5,7 @@ let
 	x = "you";
 	t = { a = 0; b = 1; c = 2; };
 in {
-	verify = {old, new, ...}: assert old // old.update == new; "attrs successfully updated";
+	verify = (import ../verifiers.nix).trivial-verify;
 	update.verify = null;
 
 	baba = { inherit x; };
@@ -23,7 +23,13 @@ in {
 	rock = { inherit (t) a b c; };
 	update.rock.a = 25;
 	update.rock.b = 30;
-	update.rock.t = 35;
+	update.rock.d = 35;
+
+	wall = { inherit (t) a b c; };
+	wall = {};
+	update.wall.a = 25;
+	update.wall.b = 30;
+	update.wall.d = 35;
 
 	flag = {};
 	flag.a = 0;

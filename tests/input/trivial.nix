@@ -2,7 +2,7 @@
 # This file contains a few trivial updates.
 
 {
-	verify = {old, new, ...}: assert old // old.update == new; "trivial successfully updated";
+	verify = (import ../verifiers.nix).trivial-verify;
 	update.verify = null;
 
 	bool = false;

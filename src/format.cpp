@@ -425,13 +425,36 @@ begin:
 }
 
 // Find or create the body of the attribute set represented by the specified expression. The state will be positioned at the end of a line and the caller is expected to add a new line immediately.
-static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxReference& src, AnchorSet& anchors, bool ensureRecursive){
+static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxReference& src, AnchorSet& anchors, bool recursive, bool forAdding){
 	const NixToken* cursor;
+	std::vector<AttributeDeclaration> decvec{};
+	nix::ExprAttrs* attrs = static_cast<nix::ExprAttrs*>(src.expression);
+	if(recursive != attrs->recursive){
+		decvec = src.findAllDeclarations();
+		for(const AttributeDeclaration& dec : decvec){
+			const BindingInfo& info = std::get<BindingInfo>(dec);
+			if(info.getDoteq()->type == '='){
+				cursor = AttrsOpenInfo::nextOpen(info.getDoteq() + 1).getOpenBracket();
+				if(recursive){
+					if((cursor - 1)->type != NixToken::kind_type::REC){
+						FormatState rec = addRewrite(state, cursor->begin);
+						rec << " rec ";
+					}
+				}else{
+					if((cursor - 1)->type == NixToken::kind_type::REC){
+						eraseRange(state, (cursor - 1)->begin, cursor->begin);
+					}
+				}
+			}
+		}
+	}
 	if(src.isIsolated()){
 		cursor = AttrsOpenInfo::nextOpen(src.boundary.data()).getOpenBracket();
 		goto positionInsideSet;
 	}else{
-		std::vector<AttributeDeclaration> decvec = src.findAllDeclarations();
+		if(recursive == attrs->recursive){
+			decvec = src.findAllDeclarations();
+		}
 		for(const AttributeDeclaration& dec : decvec){
 			// We know for a fact this can only be a binding info, because src is an attribute set.
 			const BindingInfo& info = std::get<BindingInfo>(dec);
@@ -439,7 +462,8 @@ static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxRe
 				cursor = AttrsOpenInfo::nextOpen(info.getDoteq() + 1).getOpenBracket();
 				goto positionInsideSet;
 			}
-			if(ensureRecursive){
+			if(recursive){
+				// The very first declaration is not a set declaration but it has to be for recursive to work.
 				break;
 			}
 		}
@@ -454,10 +478,14 @@ static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxRe
 
 		newLine(state, body);
 		body << state.sourceSpan(info.getFirst()->begin, (info.getDoteq() - 1)->end);
-		if(ensureRecursive){
+		if(recursive){
 			body << " = rec {";
 		}else{
 			body << " = {";
+		}
+		if(!forAdding){
+			body << "};";
+			return FormatState();
 		}
 		body.indentInfo.level++;
 
@@ -469,16 +497,16 @@ static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxRe
 		return std::move(inner);
 	}
 positionInsideSet:
-	if(ensureRecursive && !src.attrs()->recursive){
-		FormatState rfs = addRewrite(state, (cursor - 1)->end, cursor->begin);
-		rfs << " rec ";
-	}
 	const NixToken* begin = cursor;
 	maybeWalkToClosingToken(cursor);
 	const NixToken* end = cursor;
 	const NixToken* insertAfter = end - 1;
 
 	anchors.addAnchorForInsertLocation(insertAfter->end);
+
+	if(!forAdding){
+		return FormatState();
+	}
 
 	FormatState body = addRewrite(state, insertAfter->end);
 	body.indentInfo = detectIndentation(state, begin->begin, end->end, insertAfter->end);
@@ -525,7 +553,7 @@ void smartRewriteAttrs(RewriteState& state, SyntaxReference& src, const Bindings
 	// If we are adding new attributes, we must declare the attribute set first.
 	for(auto& attr : bindings){
 		if(!a->attrs->contains(attr.name)){
-			body = findOrDeclareAttributeSet(state, src, anchors, false);
+			body = findOrDeclareAttributeSet(state, src, anchors, a->recursive, true);
 			break;
 		}
 	}
@@ -567,10 +595,13 @@ void generateNegativeRewrites(RewriteState &state, AttrsOpenInfo info, uint32_t 
 
 		auto itr = anchors.upper_bound(baseInfo.getFirst()->begin);
 
-		if(!RANGE_HIT(itr,baseInfo.getLast()->end)){
+		// We keep inherit-froms because they cannot always be anchored properly.
+
+		if(!std::holds_alternative<InheritFromInfo>(ad) && !RANGE_HIT(itr,baseInfo.getLast()->end)){
 			eraseDeclaration(state, baseInfo);
 			goto continueOuterLoop;
 		}
+
 		// We are keeping this. Look for subdeclarations.
 
 		const NixToken* cursor = std::visit(nix::overloaded{

@@ -49,10 +49,11 @@ struct RewriteRange{
 	const uint32_t end;
 #ifndef NDEBUG
 	const nix::Pos pos;
-	inline RewriteRange(uint32_t b,uint32_t e,nix::Pos p): begin(b), end(e), pos(p){
+	inline RewriteRange(uint32_t b,uint32_t e,nix::Pos p): begin(b), end(e), pos(p)
 #else
-	inline RewriteRange(uint32_t b,uint32_t e): begin(b), end(e){
+	inline RewriteRange(uint32_t b,uint32_t e): begin(b), end(e)
 #endif
+	{
 		if(e < b){
 			throw std::exception();
 		}

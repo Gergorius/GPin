@@ -1,12 +1,16 @@
 
+#include <boost/callable_traits/args.hpp>
+#include <boost/callable_traits/return_type.hpp>
+#include <boost/type_traits/function_traits.hpp>
+#include <memory>
 #include <nix/expr/eval-error.hh>
 #include <nix/expr/eval.hh>
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/symbol-table.hh>
 #include <nix/expr/value.hh>
 
-#include <memory_resource>
 #include <nix/util/logging.hh>
+#include <optional>
 #include <span>
 #include <tuple>
 #include <utility>
@@ -15,6 +19,7 @@
 #include <functional>
 #include <gc/gc_allocator.h>
 #include <nix/util/pos-idx.hh>
+#include <boost/callable_traits.hpp>
 
 #include "primitives.h"
 #include "valueutil.h"
@@ -72,185 +77,275 @@ struct ExprValue : public Expr{
 };
 
 template<typename T>
-struct ExprThunk : HashableExternalValue{
-	const T* internal;
+struct ExpressionReference : HashableExternalValue{
 	Env* env;
-	ExprThunk(){}
-	ExprThunk(const T* i, Env* e): internal(i), env(e){}
+	const T* internal;
 };
 
-template<typename T,typename... Args>
-T* monoNew(std::pmr::monotonic_buffer_resource& res, Args&&... args){
-	return new (res.allocate(sizeof(T),alignof(T))) T(std::forward<Args>(args)...);
-}
+namespace mod{
 
-template<typename T,typename... Modifiers>
-struct SimulationThunk : ExprThunk<T>{
-	std::tuple<Modifiers...> mfers;
-	static_assert(std::is_trivially_destructible_v<decltype(mfers)>);
-	SimulationThunk(const T* internal,Env* env,std::tuple<Modifiers...> mod): ExprThunk<T>(internal,env), mfers(mod){}
-
-private:
-	template<size_t... index>
-	void helper(std::index_sequence<index...>, nix::EvalState& state, nix::Value& v){
-		std::tuple<typename Modifiers::template eval_state<T>...> eState;
-
-		T copy(*this->internal);
-
-		( std::get<index>(mfers).eval(state, copy, std::get<index>(eState)), ... );
-		
-		try{
-			copy.eval(state, *this->env, v);
-		}catch(nix::EvalBaseError& e){
-			std::list<nix::DebugTrace>& debugTraces = e.state.debugTraces;
-			for(auto itr = debugTraces.begin();itr != debugTraces.end();itr++){
-				nix::DebugTrace& orace = *itr;
-				if(&orace.expr == &copy){
-					debugTraces.emplace(itr,nix::DebugTrace{
-						.pos = orace.pos,
-						.expr = *this->internal,
-						.env = orace.env,
-						.hint = orace.hint,
-						.isError = orace.isError
-					});
-					itr++;
-					itr = debugTraces.erase(itr);
-				}
-			}
-			throw;
-		}
-	};
-
-public:
-	void operator()(nix::EvalState& state, nix::Value& v){
-		helper(std::index_sequence_for<Modifiers...>(), state, v);
-	}
-};
-
-template<typename T>
-void evalSimulationThunk(nix::EvalState& state, nix::PosIdx pos, nix::Value& v, nix::Value* st){
-	T* thunk = fromValue(state, st, pos, "in argument to evalSimulationThunk");
-	(*thunk)(state, v);
-}
-
-template<typename T>
-struct mem_ptr_parent{};
-
-template<typename A,typename B>
-struct mem_ptr_parent<A B::*>{
-	using type = B;
-};
-
-template<auto handle>
-struct ValueModifier{
-	template<typename T>
-	using eval_state = ExprValue;
-	Value* value;
-	template<typename T>
-	ValueModifier(EvalState& state, Env& env, const T& base){
-		Expr* eptr = std::invoke(handle,base);
-		value = eptr == nullptr ? nullptr : eptr->maybeThunk(state, env);
-	}
-	template<typename T>
-	void eval(EvalState& state, T& target, ExprValue& mod){
-		if(value == nullptr) return;
-		decltype(auto) exprPtr = std::invoke(handle, target);
-		mod = ExprValue(exprPtr, value);
-		if constexpr(std::is_reference_v<decltype(exprPtr)>){
-			exprPtr = &mod;
-		}else{
-			std::invoke(handle, target, exprPtr);
-		}
-	}
-};
-
-template<typename EType,typename... Modifiers>
-decltype(auto) mkModifiers(EvalState& state, Env& env, const EType* val){
-	using TName = SimulationThunk<EType, Modifiers...>;
-
-	TName* t = new (gc_allocator<TName>().allocate(1)) TName(val, &env, { Modifiers(state, env, *val)...});
-
-	return allocValue(state, mkAp(&primop<evalSimulationThunk<TName>>,t));
-}
-
-struct always_true{
-	template<typename... Args>
-	constexpr bool operator()(Args&&...) const { return true; }
-};
-
-struct symbol_empty{
-	constexpr bool operator()(const nix::AttrName& name) const{
+	bool symbol_empty(const nix::AttrName& name){
 		return !name.symbol;
 	}
-};
 
-struct sd_handle{
-	std::span<const nix::AttrName> operator()(const ExprSelect& base) const{
-		return base.getAttrPath();
-	}
-	void operator()(ExprSelect& base,std::span<nix::AttrName> nVal) const{
-		base.attrPathStart = nVal.data();
-		base.nAttrPath = nVal.size();
-	}
-};
-
-template<auto handle,auto filter,typename Modifier>
-struct SpanModifier{
-	template<typename B>
-	using range_type = std::remove_reference_t<std::invoke_result_t<decltype(handle), B&>>;
-
-	template<typename B>
-	struct eval_state{
-		std::vector<typename Modifier::template eval_state<typename range_type<B>::element_type>> vec;
-		std::vector<std::remove_const_t<typename range_type<B>::element_type>> rvec;
+	template<typename... Modifiers>
+	struct Tuple : private std::tuple<Modifiers...>{
+		using TargetType = std::common_type<typename Modifiers::TargetType...>;
+	private:
+		template<typename T,size_t... index>
+		static Value* setupHelper(std::index_sequence<index...>, EvalState& state, nix::Env& env, const T& target){
+			nix::ListBuilder lb = state.buildList(sizeof...(Modifiers));
+			( (lb[index] = Modifiers::setup(state, env, target)), ... );
+			Value* val = state.allocValue();
+			val->mkList(lb);
+			return val;
+		}
+		template<typename T,size_t... index>
+		void sanitizeHelper(std::index_sequence<index...>,EvalState& state, const T& target, nix::DebugTrace& trace) const {
+			( std::get<index>(*this).sanitize(state, target, trace), ...);
+		}
+		template<typename T,size_t... index>
+		void initHelper(std::index_sequence<index...>,EvalState& state, T& target, Value* data){
+			state.forceList(*data, nix::noPos, "inside greedy modifier evaluator");
+			nix::ListView list = data->listView();
+			if(list.size() != sizeof...(Modifiers)){
+				state.error<nix::EvalError>("bad list length for modifier evaluator. Expected %1% got %2%", sizeof...(Modifiers), list.size()).debugThrow();
+			}
+			( std::get<index>(*this).init(state, target, list[index]), ...);
+		}
+	public:
+		template<typename T>
+		static Value* setup(EvalState& state, nix::Env& env, const T& target){
+			return setupHelper(std::index_sequence_for<Modifiers...>{}, state, env, target);
+		}
+		template<typename T>
+		void init(EvalState& state, T& target, Value* data){ initHelper(std::index_sequence_for<Modifiers...>{}, state, target, data); }
+		template<typename T>
+		void sanitize(EvalState& state, const T& target, nix::DebugTrace& trace) const {
+			sanitizeHelper(std::index_sequence_for<Modifiers...>{}, state, target, trace);
+		}
 	};
 
-	std::span<Modifier> modifiers;
-	
-	template<typename T>
-	SpanModifier(EvalState& state, Env& env, T& base){
-		decltype(auto) range = std::invoke(handle, base);
-		size_t modifierCount = 0;
-		for(auto& val : range){
-			if(filter(val)){
-				modifierCount++;
-			}
+	template<typename Modifier>
+	struct CastPointer : private Modifier{
+	private:
+		using SubType = std::remove_const_t<std::remove_pointer_t<typename Modifier::TargetType>>;
+	public:
+		template<typename T>
+		static Value* setup(EvalState& state, nix::Env& env, const T& target){
+			return Modifier::setup(state, env, static_cast<const SubType*>(target));
 		}
-		Modifier* modifierArray = gc_allocator<Modifier>().allocate(modifierCount);
-		size_t i = 0;
-		for(auto& val : range){
-			if(filter(val)){
-				new (modifierArray + i) Modifier(state, env, val);
-				i++;
-			}
+		template<typename T>
+		void init(EvalState& state, T& target, Value* data){
+			const SubType* ptr = static_cast<SubType*>(target);
+			Modifier::init(state, ptr, data);
+			target = const_cast<SubType*>(ptr);
 		}
-		this->modifiers = { modifierArray, modifierCount };
+		template<typename T>
+		void sanitize(EvalState& state, const T& target, nix::DebugTrace& trace) const {
+			Modifier::sanitize(state,static_cast<const SubType*>(target), trace);
+		}
 	};
 
-	template<typename T>
-	void eval(EvalState& state, T& target, eval_state<T>& mod){
-		if(modifiers.size() == 0){
-			return;
+	template<typename T,typename Modifier>
+	struct CopyExpr : private Modifier{
+		std::optional<T> carrier;
+		using TargetType = const T*;
+		static Value* setup(EvalState& state, nix::Env& env, const T* target){
+			return Modifier::setup(state, env, *target);
 		}
-		decltype(auto) range = std::invoke(handle, target);
+		void init(EvalState& state, const T*& target, Value* data){
+			carrier.emplace(*target);
+			target = &*carrier;
+			Modifier::init(state, *carrier, data);
+		}
+		T& getCopy(){
+			return *carrier;
+		}
+		void sanitize(EvalState& state, const T* target, nix::DebugTrace& trace) const {
+			if(&trace.expr == (T*)this){
+				nix::DebugTrace copy = nix::DebugTrace(std::move(trace));
+				new (&trace) nix::DebugTrace{
+					.pos = std::move(copy.pos),
+					.expr = *target,
+					.env = copy.env,
+					.hint = copy.hint,
+					.isError = copy.isError
+				};
+			}
+			Modifier::sanitize(state, *target, trace);
+		}
+	};
 
-		mod.vec.resize(modifiers.size());
-		mod.rvec.append_range(range);
-
-		size_t i = 0;
-		for(auto& val : mod.rvec){
-			if(filter(val)){
-				modifiers[i].eval(state, val, mod.vec[i]);
-				i++;
+	struct ThunkExpr{
+		ExprValue copy;
+		using TargetType = nix::Expr*;
+		static Value* setup(EvalState& state, nix::Env& env, nix::Expr* target){
+			if(target == nullptr){
+				return &Value::vNull;
+			}else{
+				return target->maybeThunk(state, env);
 			}
 		}
-
-		if constexpr(std::is_reference_v<decltype(range)>){
-			range = mod.rvec;
-		}else{
-			std::invoke(handle, target, mod.rvec);
+		void init(EvalState& state, nix::Expr*& target, Value* data){
+			copy.internal = target;
+			copy.value = data;
+			if(target != nullptr){
+				target = &copy;
+			}
 		}
+		void sanitize(EvalState& state, const nix::Expr* target, nix::DebugTrace& trace) const {}
+	};
+
+	template<auto handle,typename Inner = ThunkExpr>
+	struct Member : private Inner{
+		using TargetType = std::remove_cvref_t<std::tuple_element_t<0, boost::callable_traits::args_t<decltype(handle)>>>;
+		template<typename T>
+		static Value* setup(EvalState& state, nix::Env& env, const T& target){
+			return Inner::setup(state, env, std::invoke(handle,target));
+		}
+		template<typename T>
+		void init(EvalState& state, T& target, Value* data){
+			Inner::init(state, std::invoke(handle, target), data);
+		}
+		template<typename T>
+		void sanitize(EvalState& state, const T& target, nix::DebugTrace& trace) const {
+			Inner::sanitize(state, std::invoke(handle, target), trace);
+		}
+	};
+
+	template<auto filter, typename Inner>
+	struct Filter : private Inner{
+		using TargetType = Inner::TargetType;
+		template<typename T>
+		static Value* setup(EvalState& state, nix::Env& env, const T& target){
+			if(filter(target)){
+				return Inner::setup(state, env, target);
+			}else{
+				return &Value::vNull;
+			}
+		}
+		template<typename T>
+		void init(EvalState& state, T& target, Value* data){
+			if(filter(target)){
+				Inner::init(state, target, data);
+			}
+		}
+		template<typename T>
+		void sanitize(EvalState& state, const T& target, nix::DebugTrace& trace) const {
+			if(filter(target)){
+				Inner::sanitize(state, target, trace);
+			}
+		}
+	};
+
+	template<typename Inner>
+	struct Span{
+	private:
+		using InnerTarget = Inner::TargetType;
+	public:
+		using TargetType = std::span<InnerTarget>;
+		std::unique_ptr<Inner[]> innerMemory;
+		std::unique_ptr<InnerTarget[]> replacementStorage;
+		static Value* setup(EvalState& state, nix::Env& env, TargetType target){
+			nix::ListBuilder lb = state.buildList(target.size());
+			for(size_t i = 0;i < target.size();i++){
+				lb.elems[i] = Inner::setup(state, env, target[i]);
+			}
+			Value* val = state.allocValue();
+			val->mkList(lb);
+			return val;
+		}
+	public:
+		void init(EvalState& state, TargetType& target, Value* data){
+			state.forceList(*data, nix::noPos, "inside greedy modifier evaluator");
+			nix::ListView list = data->listView();
+			innerMemory.reset(new Inner[list.size()]);
+			replacementStorage.reset(std::allocator<InnerTarget>{}.allocate(list.size()));
+			for(size_t index = 0;index < list.size();index++){
+				new (replacementStorage.get() + index) InnerTarget(target[index]);
+				innerMemory[index].init(state, replacementStorage[index], list[index]);
+			}
+			target = {replacementStorage.get(), list.size()};
+		}
+		template<typename T>
+		void sanitize(EvalState& state, T target, nix::DebugTrace& trace) const {
+			TargetType span = target;
+			for(uint32_t index = 0;index < span.size();index++){
+				innerMemory[index].sanitize(state, span[index], trace);
+			}
+		}
+	};
+
+
+	template<auto ptrHandle,auto extentHandle,typename Inner>
+	struct ProxiedSpan : private Span<Inner>{
+	private:
+		using InnerTarget = Span<Inner>::TargetType;
+	public:
+		using TargetType = std::remove_cvref_t<std::tuple_element_t<0, boost::callable_traits::args_t<decltype(ptrHandle)>>>;
+		template<typename T>
+		static Value* setup(EvalState& state, nix::Env& env, const T& target){
+			return Span<Inner>::setup(state, env, InnerTarget{std::invoke(ptrHandle,target),std::invoke(extentHandle,target)});
+		}
+	private:
+		template<typename T>
+		static Span<Inner> evalHelper(EvalState& state, T& target, Value* data){
+			InnerTarget tt{std::invoke(ptrHandle,target),std::invoke(extentHandle,target)};
+			return Span<Inner>(state, tt, data);
+		}
+	public:
+		template<typename T>
+		void init(EvalState& state, T& target, Value* data){
+			decltype(auto) ptr = std::invoke(ptrHandle, target);
+			decltype(auto) ext = std::invoke(extentHandle, target);
+			static_assert(std::is_assignable_v<decltype(ptr)&&,typename InnerTarget::pointer>);
+			static_assert(std::is_assignable_v<decltype(ext)&&,typename InnerTarget::size_type>);
+			InnerTarget span = {ptr, ext};
+			Span<Inner>::init(state, span, data);
+			ptr = span.data();
+			ext = span.size();
+		}
+		template<typename T>
+		void sanitize(EvalState& state, const T& target, nix::DebugTrace& trace) const {
+			return Span<Inner>::sanitize(state, InnerTarget{std::invoke(ptrHandle,target),std::invoke(extentHandle,target)}, trace);
+		}
+	};
+}
+
+template<typename ExprType,typename Modifier>
+void evalModifiers(nix::EvalState& state, nix::PosIdx pos, nix::Value& v, nix::Value* expRef, nix::Value* data){
+	ExpressionReference<ExprType>* eref = fromValue(state, expRef, pos, "in argument to evalSimulationThunk");
+
+	const ExprType* tty = eref->internal;
+
+	mod::CopyExpr<ExprType,Modifier> mod;
+
+	mod.init(state, tty, data);
+
+	try{
+		mod.getCopy().eval(state, *eref->env, v);
+	}catch(nix::EvalBaseError& e){
+		std::list<nix::DebugTrace>& debugTraces = e.state.debugTraces;
+		for(nix::DebugTrace& dt : e.state.debugTraces){
+			mod.sanitize(state, eref->internal, dt);
+		}
+		throw;
 	}
+}
+
+template<typename ExprType,typename Modifier>
+decltype(auto) mkModifiers(EvalState& state, Env& env, const ExprType* val){
+	using TName = mod::CopyExpr<ExprType,Modifier>;
+	using RName = ExpressionReference<ExprType>;
+
+	RName* t = new (gc_allocator<RName>().allocate(1)) RName();
+	t->env = &env;
+	t->internal = val;
+
+	nix::Value* data = TName::setup(state, env, val);
+
+	return allocValue(state, mkAp(&primop<evalModifiers<ExprType,Modifier>>, t, data));
 };
 
 }
@@ -288,6 +383,23 @@ Value* Greedy<ExprCall>::maybeThunk(EvalState& state, Env& env){
 	}
 	return fThunk;
 };
+
+Value* Greedy<nix::ExprAssert>::maybeThunk(EvalState& state, Env& env){
+	using namespace mod;
+	if(dynamic_cast<nix::ExprOpEq*>(cond)){
+		using TMod = Tuple<
+			Member<&nix::ExprAssert::cond,CastPointer<CopyExpr<nix::ExprOpEq, Tuple<Member<&nix::ExprOpEq::e1>,Member<&nix::ExprOpEq::e2>>>>>,
+			Member<&nix::ExprAssert::body>
+		>;
+		return mkModifiers<nix::ExprAssert, TMod>(state, env, this);
+	}else{
+		using TMod = Tuple<
+			Member<&nix::ExprAssert::cond>,
+			Member<&nix::ExprAssert::body>
+		>;
+		return mkModifiers<nix::ExprAssert, TMod>(state, env, this);
+	}
+}
 
 template<typename E>
 Value* maybeThunkOnBody(EvalState& state, Env& env, E& expr){

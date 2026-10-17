@@ -170,7 +170,7 @@ const SourceInfo& loadFileImpl(EvalStateForUpdate& state, const nix::SourcePath&
 
 	info.content = std::make_shared<std::string>(file.readFile());
 
-    nix::Pos::Origin origin = file;
+	nix::Pos::Origin origin = file;
 	nix::Exprs& exprs = state.mem.exprs;
 
 	parseExprFromString(info.parseResult, state, origin, info.basePath, exprs, *info.content);
@@ -312,15 +312,12 @@ static bool rewriteMemberAttrs(RewriteState& state, SyntaxReference& sr, AnchorS
 	if(attrs->inheritFromExprs){
 		for(uint32_t i = 0;i < attrs->inheritFromExprs->size();i++){
 			std::optional<SyntaxReference> fromSr = sr.getInheritFromExpression(i);
-			if(!fromSr.has_value()){
-				Value temp;
-				// There are no variables in the expression, period. If there were, we would be looking at a valid SyntaxReference because variables always have valid positions. I think it is safe to try evaluating it with any environment. That being said, we are forcing an attrs because this is in an inherit from selector. We are expecting this evalAttrs to throw an exception, because isolatable attribute sets also always have a position.
-				state.eval().eval(attrs->inheritFromExprs->at(0), temp);
-				state.eval().forceAttrs(temp, attrs->getPos(), "while trying to determine whether an inherit-from is significant");
+			if(fromSr.has_value()){
+				anchors.addAnchorForInheritFrom(*fromSr);
+				isolatedRewrite(state, *std::move(fromSr));
+			}else{
+				// This is a very strange inherit-from because it contains no variables, attribute sets or selectors. We cannot put an anchor on it so we more or less treat it similarly to the way we treat undiscoverable attribute set declarations. Whether or not they get erased is at the discretion of the negative rewriter.
 			}
-			SyntaxReference fromSyntax = *std::move(fromSr);
-			anchors.addAnchorForInheritFrom(fromSyntax);
-			isolatedRewrite(state, std::move(fromSyntax));
 		}
 	}
 
