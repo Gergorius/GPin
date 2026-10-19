@@ -89,6 +89,7 @@ inline std::ostream& operator<<(std::ostream& out,RewriteLink* lnk){
 
 struct RewriteState{
 	NixValueInternPool& pool;
+	NixValueCycles& cycles;
 	nix::EvalState& evalState;
 	const nix::PosTable::Origin& origin;
 	// String to use for indentation. It is a part of source.

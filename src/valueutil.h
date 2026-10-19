@@ -6,6 +6,7 @@
 #include <nix/expr/eval-error.hh>
 #include <nix/util/error.hh>
 #include <ostream>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <gc/gc.h>
@@ -50,6 +51,7 @@ private:
 		size_t operator()(const PoolPtr& a) const { return NixValueComparer::hash(a.value); }
 		bool operator()(const PoolPtr& a,const PoolPtr& b) const { return NixValueComparer::eq(a.value,b.value); }
 	};
+ 
 	std::unordered_set<
 		PoolPtr,
 		PoolPtrHashEq,
@@ -63,6 +65,12 @@ public:
 	inline NixValueInternPool(nix::EvalState& s): state(s){}
 	// Interns the value, including all subvalues. Returns a pointer to the canonical value. If two pointers x and y are equal according to NixValueComparer then `intern(x) == intern(y)`. This method may modify the argument value in any way as long as such modification is not observable to nix code. These modifications may take place even if `intern` returns a different result. Modifying either the argument or return value of the intern pool, any subvalues, or interning them to a different pool while this pool is alive leads to undefined behavior.
 	const nix::Value* intern(nix::Value* value);
+};
+
+// Structure used to communicate which nix values are parts of cycles.
+struct NixValueCycles : private std::unordered_map<const nix::Value*,bool>{
+	// Determines whether the value is part of a cycle. The result is cached for the value and all subvalues.
+	bool checkForCycle(const nix::Value* v);
 };
 
 nix::InternalType internalType(const nix::Value& v);

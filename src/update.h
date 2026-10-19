@@ -45,6 +45,7 @@ struct EvalStateForUpdate : EvalState{
 
 	// This pool is EXCLUSIVELY for deeperForce'd nix values. DO NOT intern a value that was not deeperForced. (See deeperForce in "valueutil.h")
 	NixValueInternPool pool = NixValueInternPool(*this);
+	NixValueCycles cycles = NixValueCycles();
 
 	using EvalState::EvalState;
 
