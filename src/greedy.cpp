@@ -109,7 +109,7 @@ namespace mod{
 			state.forceList(*data, nix::noPos, "inside greedy modifier evaluator");
 			nix::ListView list = data->listView();
 			if(list.size() != sizeof...(Modifiers)){
-				state.error<nix::EvalError>("bad list length for modifier evaluator. Expected %1% got %2%", sizeof...(Modifiers), list.size()).debugThrow();
+				state.error<nix::EvalError>("expected a list of length %1% but got %2%", sizeof...(Modifiers), list.size()).debugThrow();
 			}
 			( std::get<index>(*this).init(state, target, list[index]), ...);
 		}
@@ -315,6 +315,14 @@ namespace mod{
 
 template<typename ExprType,typename Modifier>
 void evalModifiers(nix::EvalState& state, nix::PosIdx pos, nix::Value& v, nix::Value* expRef, nix::Value* data){
+
+	// EvalState sees us as an app but really, we are a stand-in for a thunk. Therefore it is our job to check for black holes.
+
+	if(v.isBlackhole()){
+		nix::ExprBlackHole::throwInfiniteRecursionError(state, v);
+	}
+	v.mkBlackhole();
+
 	ExpressionReference<ExprType>* eref = fromValue(state, expRef, pos, "in argument to evalSimulationThunk");
 
 	const ExprType* tty = eref->internal;
@@ -412,10 +420,7 @@ Value* maybeThunkOnBody(EvalState& state, Env& env, E& expr){
 		const nix::Value::ClosureThunk& thunk = dummy.thunk();
 		return thunk.expr->maybeThunk(state, *thunk.env);
 	}else{
-		state.error<nix::EvalError>("a thunk was expected").withFrame(env, expr).atPos(expr.getPos()).panic();
-		Value* copy = state.allocValue();
-		*copy = dummy;
-		return copy;
+		nix::panic("a thunk was expected");
 	}
 }
 

@@ -65,7 +65,7 @@ Value* RecordedExprAttrs::maybeThunk(EvalState& state, Env& env){
 	val->mkThunk(&env, this);
 	if(!stateu.valueMap.insert({this, nix::allocRootValue(val)}).second){
 		[[unlikely]];
-		state.error<nix::EvalError>("RecordedExprAttrs::maybeThunk was called after a value was already created!").panic();
+		nix::panic("RecordedExprAttrs::maybeThunk was called after a value was already created!");
 	}
 	stateu.forceQueue.push_back(val);
 	return val;
@@ -345,6 +345,7 @@ static bool rewriteMemberAttrs(RewriteState& state, SyntaxReference& sr, AnchorS
 bool EvalStateForUpdate::doRewrite(std::ostream& out, const SourceInfo& info){
 	RewriteState rewrite{
 		.pool = this->pool,
+		.cycles = this->cycles,
 		.evalState = *this,
 		.origin = *info.parseResult.origin,
 		.defaultIndent = "",

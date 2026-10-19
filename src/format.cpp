@@ -5,12 +5,14 @@
 #include "valueutil.h"
 
 #include <algorithm>
+#include <boost/multi_index_container_fwd.hpp>
 #include <cmath>
 #include <cstdint>
 #include <format>
 #include <memory>
 #include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-error.hh>
+#include <nix/expr/eval.hh>
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/print.hh>
 #include <nix/expr/symbol-table.hh>
@@ -24,13 +26,35 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
+#include <boost/multi_index_container.hpp>
 
 #pragma clang diagnostic error "-Wswitch"
 #pragma clang diagnostic error "-Wimplicit-fallthrough"
 
+// TODO
+// Handle unreferencable symbols in cycles
+// Handle lists and primitive operator applications in cycles
+
 namespace gpin{
+
+// Copied over from print.cc.
+static bool isVarName(std::string_view s){
+	if (s.size() == 0)
+		return false;
+	if (nix::isReservedKeyword(s))
+		return false;
+	char c = s[0];
+	if ((c >= '0' && c <= '9') || c == '-' || c == '\'')
+		return false;
+	for (auto & i : s)
+		if (!((i >= 'a' && i <= 'z') || (i >= 'A' && i <= 'Z') || (i >= '0' && i <= '9') || i == '_' || i == '-'
+				|| i == '\''))
+			return false;
+	return true;
+}
 
 using std::string;
 using std::string_view;
@@ -47,51 +71,51 @@ struct IndentInfo{
 	uint32_t level;
 };
 
-struct FormatState{
-	RewriteLink* cursor;
+struct Cursor{
+	RewriteLink* targetLink;
 	IndentInfo indentInfo;
 public:
-	FormatState(){}
-	FormatState(std::unique_ptr<RewriteLink>& t){
-		t.reset(cursor = new RewriteLink());
+	Cursor(){}
+	Cursor(std::unique_ptr<RewriteLink>& t){
+		t.reset(targetLink = new RewriteLink());
 	}
-	FormatState(FormatState&& that){
-		cursor = that.cursor;
+	Cursor(Cursor&& that){
+		targetLink = that.targetLink;
 		indentInfo = that.indentInfo;
-		that.cursor = nullptr;
+		that.targetLink = nullptr;
 	}
-	FormatState(const FormatState&) = delete;
-	FormatState& operator=(FormatState&& that){
-		this->~FormatState();
-		new (this) FormatState(std::move(that));
+	Cursor(const Cursor&) = delete;
+	Cursor& operator=(Cursor&& that){
+		this->~Cursor();
+		new (this) Cursor(std::move(that));
 		return *this;
 	}
-	FormatState& operator=(const FormatState&) = delete;
+	Cursor& operator=(const Cursor&) = delete;
 private:
 	RewriteLink& push(){
 		RewriteLink* nl = new RewriteLink();
-		nl->next = std::move(cursor->next);
-		cursor->next.reset(nl);
-		cursor = nl;
+		nl->next = std::move(targetLink->next);
+		targetLink->next.reset(nl);
+		targetLink = nl;
 		return *nl;
 	}
 public:
 	// Split the insertion cursor into two. Everything added to the new returned format state will precede anything subsequently added to this format state. The lifetimes of the states are not interrelated.
-	FormatState split(){
-		FormatState temp;
-		temp.cursor = cursor;
+	Cursor split(){
+		Cursor temp;
+		temp.targetLink = targetLink;
 		temp.indentInfo = indentInfo;
 		push();
 		return temp;
 	}
-	FormatState& operator<<(string str){
+	Cursor& operator<<(string str){
 		if(str.empty()){ return *this; }
-		if(cursor->view().empty()){
-			cursor->data = std::move(str);
+		if(targetLink->view().empty()){
+			targetLink->data = std::move(str);
 			return *this;
 		}
-		if(std::holds_alternative<string>(cursor->data)){
-			std::string& s = std::get<string>(cursor->data);
+		if(std::holds_alternative<string>(targetLink->data)){
+			std::string& s = std::get<string>(targetLink->data);
 			if(s.size() + str.size() <= s.capacity()){
 				s += std::move(str);
 				return *this;
@@ -100,14 +124,14 @@ public:
 		push().data = std::move(str);
 		return *this;
 	}
-	FormatState& operator<<(string_view view){
+	Cursor& operator<<(string_view view){
 		if(view.empty()){ return *this; }
-		if(cursor->view().empty()){
-			cursor->data = view;
+		if(targetLink->view().empty()){
+			targetLink->data = view;
 			return *this;
 		}
-		if(view.size() < 0x10 && std::holds_alternative<string>(cursor->data)){
-			std::string& s = std::get<string>(cursor->data);
+		if(view.size() < 0x10 && std::holds_alternative<string>(targetLink->data)){
+			std::string& s = std::get<string>(targetLink->data);
 			if(s.size() + view.size() <= s.capacity()){
 				s += view;
 				return *this;
@@ -117,7 +141,7 @@ public:
 		return *this;
 	}
 	template<size_t N>
-	FormatState& operator<<(const char (&str)[N]){
+	Cursor& operator<<(const char (&str)[N]){
 		return this->operator<<(string_view(str));
 	}
 };
@@ -203,50 +227,177 @@ static IndentInfo detectIndentation(RewriteState& state, uint32_t begin, uint32_
 	return detectIndentation(state.source.substr(lineStart, end - lineStart), focus - lineStart);
 }
 
-struct chart_info{
-	std::vector<nix::Symbol> path;
-	uint32_t strength; // Already existing paths take priority over paths we make.
-	inline chart_info(): path(), strength(0){}
+struct BasicChartValueInfo{
+	const BasicChartValueInfo* pathParent = nullptr;
+	nix::Symbol pathName = nix::Symbol();
+	BasicChartValueInfo(){}
+	const BasicChartValueInfo* asPtr() const;
 };
 
-static void chart(nix::Expr* expr, Value* value, std::vector<nix::Symbol>& path, std::unordered_map<Value*, chart_info>& paths){
-	if(!path.empty()){
-		auto& info = paths[value];
-		int strength = expr == nullptr ? 1 : 2;
-		if(info.strength < strength || info.strength == strength && path.size() < info.path.size()){
-			info.path = path;
-			info.strength = strength;
-		}else{
-			return;
-		}
+static const BasicChartValueInfo root_store = BasicChartValueInfo();
+static const BasicChartValueInfo* path_unreachable = nullptr;
+static const BasicChartValueInfo* path_env = &root_store;
+
+const BasicChartValueInfo* BasicChartValueInfo::asPtr() const{ return pathParent == path_unreachable ? path_unreachable : this; }
+
+bool samePath(const BasicChartValueInfo* left, const BasicChartValueInfo* right){
+	if(left == right){
+		return true;
 	}
+	if(left == path_env || right == path_env || left == path_unreachable || right == path_unreachable){
+		return false;
+	}
+	return left->pathName == right->pathName && samePath(left->pathParent, right->pathParent);
+}
+
+struct ChartValueInfo : BasicChartValueInfo{
+	uint32_t pathCost = 0xFFFFFFFFu;
+	ChartValueInfo(){}
+};
+
+struct ChartContext{
+	RewriteState& state;
+	std::unordered_map<const Value*, ChartValueInfo>& paths;
+};
+
+static void chart(ChartContext& context, const Value* value, ChartValueInfo& info){
 	if(value->type() != nix::nAttrs){
 		return;
 	}
-	const ExprAttrs* attrs = dynamic_cast<ExprAttrs*>(expr);
 	for(auto& bnd : *value->attrs()){
-		nix::Expr* subexpr = nullptr;
-		if(attrs != nullptr){
-			auto itr = attrs->attrs->find(bnd.name);
-			if(itr != attrs->attrs->end()){
-				subexpr = itr->second.e;
-			}
+		const nix::Value* subValue = bnd.value;
+
+		ChartValueInfo& subInfo = context.paths[subValue];
+
+		uint32_t subPathCost = info.pathCost + context.state.eval().symbols[bnd.name].size() + 1;
+
+		if(subPathCost < subInfo.pathCost){
+			subInfo.pathParent = &info;
+			subInfo.pathCost = subPathCost;
+			subInfo.pathName = bnd.name;
+			chart(context, subValue, subInfo);
 		}
-		path.push_back(bnd.name);
-		chart(subexpr, bnd.value, path, paths);
-		path.pop_back();
 	}
 }
 
-static FormatState addRewrite(RewriteState& rs,uint32_t begin,uint32_t end){
+// Reverse environment used for substituting values.
+struct FormatEnv{
+	friend const ChartValueInfo* lookup(const FormatEnv* env, const Value* vptr);
+	friend bool wasMadeRecursive(const FormatEnv* env, const Value* vptr);
+	const Value* definedForValue;
+private:
+	using map_type = std::unordered_map<nix::Symbol, std::unordered_map<const Value*, ChartValueInfo>>;
+	map_type data;
+	const FormatEnv* parent;
+	struct Inhibitor{
+		const Inhibitor* parent;
+		const map_type& map;
+	};
+	void lookupBestReference(const Value* vptr, const Inhibitor* inhibitor, const ChartValueInfo*& bestMatch) const{
+		for(auto& [sym, map] : data){
+			auto itr = map.find(vptr);
+			if(itr == map.end()){
+				continue;
+			}
+			const ChartValueInfo* info = &itr->second;
+			const Inhibitor* li = inhibitor;
+			while(li != nullptr){
+				if(li->map.contains(sym)){
+					goto continueOuter;
+				}
+				li = li->parent;
+			}
+			if(bestMatch == nullptr || info->pathCost < bestMatch->pathCost){
+				bestMatch = info;
+			}
+		continueOuter:;
+		}
+		if(parent != nullptr){
+			Inhibitor ti{.parent = inhibitor, .map = data};
+			parent->lookupBestReference(vptr, &ti, bestMatch);
+		}
+	}
+public:
+	FormatEnv(): parent(nullptr){}
+	FormatEnv(const FormatEnv* p): parent(p){}
+	bool addSymbol(RewriteState& state, nix::Symbol symbol, const Value* value){
+		auto itr = data.insert({symbol, map_type::mapped_type{}});
+		std::unordered_map<const Value*, ChartValueInfo>& paths = itr.first->second;
+		if(itr.second){
+			string_view symbolName = state.eval().symbols[symbol];
+
+			// The first symbol must be a var name, otherwise we won't be able to reference it. The rest of the symbols can be whatever.
+			if(isVarName(symbolName)){
+				ChartValueInfo& i = paths.insert({value, ChartValueInfo{}}).first->second;
+				i.pathParent = path_env;
+				i.pathName = symbol;
+				i.pathCost = symbolName.size();
+				ChartContext context = ChartContext{
+					.state = state,
+					.paths = paths
+				};
+				chart(context, value, i);
+			}
+		}
+		return !paths.empty();
+	}
+};
+
+// Was this value already made recursive?
+bool wasMadeRecursive(const FormatEnv* env, const Value* vptr){
+	while(env != nullptr){
+		if(env->definedForValue == vptr){
+			return true;
+		}
+		env = env->parent;
+	}
+	return false;
+}
+
+const ChartValueInfo* lookup(const FormatEnv* env, const Value* vptr){
+	const ChartValueInfo* ref = nullptr;
+	if(env != nullptr){
+		env->lookupBestReference(vptr, nullptr, ref);
+	}
+	return ref;
+}
+
+template<bool mayChangeRecursiveness,typename BindingsT>
+bool maybeMakeFormatEnv(RewriteState& state, ExprAttrs* attrs, FormatEnv& subEnv, const FormatEnv*& env, const BindingsT& bindings, const Value* vptr){
+
+	bool wantRecursive = false;
+	if(mayChangeRecursiveness){
+		if(wasMadeRecursive(env, vptr)){
+			return false;
+		}
+		for(auto& attr : bindings){
+			if(mayChangeRecursiveness && !wantRecursive && state.cycles.checkForCycle(attr.value)){
+				wantRecursive = true;
+			}
+		}
+	}else{
+		wantRecursive = attrs->recursive;
+	}
+	if(wantRecursive){
+		subEnv = FormatEnv(env);
+		subEnv.definedForValue = vptr;
+		for(auto& attr : bindings){
+			subEnv.addSymbol(state, attr.name, attr.value);
+		}
+		env = &subEnv;
+	}
+	return wantRecursive;
+}
+
+static Cursor addRewrite(RewriteState& rs,uint32_t begin,uint32_t end){
 #ifndef NDEBUG
-	return FormatState(rs.replacement.insert({RewriteRange{begin, end, rs.offsetToNixPos(begin)}, nullptr})->second);
+	return Cursor(rs.replacement.insert({RewriteRange{begin, end, rs.offsetToNixPos(begin)}, nullptr})->second);
 #else
-	return FormatState(rs.replacement.insert({{begin, end}, nullptr})->second);
+	return Cursor(rs.replacement.insert({RewriteRange{begin, end}, nullptr})->second);
 #endif
 }
 
-static FormatState addRewrite(RewriteState& rs,uint32_t begin){
+static Cursor addRewrite(RewriteState& rs,uint32_t begin){
 	return addRewrite(rs, begin, begin);
 }
 
@@ -254,11 +405,11 @@ static void eraseRange(RewriteState& rs,uint32_t begin,uint32_t end){
 #ifndef NDEBUG
 	rs.replacement.insert({RewriteRange{begin, end, rs.offsetToNixPos(begin)}, nullptr});
 #else
-	rs.replacement.insert({{begin, end}, nullptr});
+	rs.replacement.insert({RewriteRange{begin, end}, nullptr});
 #endif
 }
 
-static bool newLine(RewriteState& rs, FormatState& fs){
+static bool newLine(RewriteState& rs, Cursor& fs){
 	if(fs.indentInfo.indent.size() == 0){
 		return false; // No new lines.
 	}
@@ -269,31 +420,57 @@ static bool newLine(RewriteState& rs, FormatState& fs){
 	return true;
 }
 
-static void addBrackets(RewriteState& rs, FormatState& state){
+static void addBrackets(RewriteState& rs, Cursor& state){
 	state << "(";
-	FormatState temp = state.split();
+	Cursor temp = state.split();
 	state << ")";
 	state = std::move(temp);
 }
 
 #define STREAM(os,code) [&]() -> std::string{ std::ostringstream os; code; return std::move(os).str(); }()
 
-template<bool atomic>
-static void formatValue(RewriteState& rs, FormatState state, const Value& value);
+static void formatPath(RewriteState& rs, Cursor state, const BasicChartValueInfo* path){
+	while(path != path_env){
+		Cursor temp;
+		if(path->pathParent != path_env){
+			temp = state.split();
+			state << ".";
+		}
+		state << STREAM(os,nix::printAttributeName(os, rs.eval().symbols[path->pathName]));
+		state = std::move(temp);
+		path = path->pathParent;
+	}
+};
 
-static void formatBinding(RewriteState& rs, FormatState state, const nix::Attr& attr){
+template<bool atomic>
+static void formatValue(RewriteState& rs, const BasicChartValueInfo* path, const FormatEnv* env, Cursor state, const Value& value);
+
+static void formatBinding(RewriteState& rs, const BasicChartValueInfo* path, const FormatEnv* env, Cursor state, const nix::Attr& attr){
 	newLine(rs, state);
+
+	BasicChartValueInfo subInfo;
+	subInfo.pathParent = path;
+	subInfo.pathName = attr.name;
 
 	state << STREAM(os,nix::printAttributeName(os, rs.eval().symbols[attr.name]));
 	state << " = ";
 
-	formatValue<false>(rs, state.split(), *attr.value);
+	formatValue<false>(rs, subInfo.asPtr(), env, state.split(), *attr.value);
 	state << ";";
 }
 
+static bool possiblyFormatLookup(RewriteState& rs, const BasicChartValueInfo* path, const FormatEnv* env, Cursor& state, const Value& value){
+	const BasicChartValueInfo* lookupPath = lookup(env, &value);
+	if(lookupPath != path_unreachable && !samePath(lookupPath, path)){
+		formatPath(rs, std::move(state), lookupPath);
+		return true;
+	}else{
+		return false;
+	}
+}
+
 template<bool atomic>
-static void formatValue(RewriteState& rs, FormatState state, const Value& value){
-begin:
+static void formatValue(RewriteState& rs, const BasicChartValueInfo* path, const FormatEnv* env, Cursor state, const Value& value){
 	switch(internalType(value)){
 		case nix::tBool:
 			if(value.boolean()){
@@ -304,7 +481,8 @@ begin:
 			break;
 		case nix::tString:
 			if(value.context()){
-				rs.eval().error<nix::EvalError>("cannot serialize string with context").debugThrow();
+				Value temp = value;
+				rs.eval().forceStringNoCtx(temp, nix::noPos, "while trying to update an attribute");
 			}
 			state << STREAM(os,nix::printLiteralString(os, value.string_view()));
 			break;
@@ -353,12 +531,21 @@ begin:
 			const Bindings& bindings = *value.attrs();
 			if(bindings.size() == 0){
 				state << "{}";
-			}else{
-				state << "{";
+			}else if(!possiblyFormatLookup(rs, path, env, state, value)){
+
+				FormatEnv localEnv;
+				bool wantRecursive = maybeMakeFormatEnv<true>(rs, nullptr, localEnv, env, bindings, &value);
+
+				if(wantRecursive){
+					path = path_env; // We become the environment.
+					state << "rec {";
+				}else{
+					state << "{";
+				}
 
 				state.indentInfo.level++;
 				for(auto& binding : bindings){
-					formatBinding(rs, state.split(), binding);
+					formatBinding(rs, path, env, state.split(), binding);
 				}
 
 				state.indentInfo.level--;
@@ -372,7 +559,7 @@ begin:
 			nix::ListView list = value.listView();
 			if(list.size() == 0){
 				state << "[]";
-			}else{
+			}else if(!possiblyFormatLookup(rs, path, env, state, value)){
 				state << "[";
 
 				state.indentInfo.level++;
@@ -381,7 +568,7 @@ begin:
 					if(!newLine(rs, state) && notFirst){
 						state << " ";
 					}
-					formatValue<true>(rs, state.split(), *val);
+					formatValue<true>(rs, path_unreachable, env, state.split(), *val);
 					notFirst = true;
 				}
 
@@ -399,33 +586,50 @@ begin:
 					return;
 				}
 			}
-			rs.eval().error<nix::EvalError>("Could not resolve primitive operator %1%", value.primOp()->name).debugThrow();
+			rs.eval().error<nix::EvalError>("could not resolve primitive operator %1%", value.primOp()->name).debugThrow();
 		}break;
 		
-		case nix::tPrimOpApp:{
+		case nix::tPrimOpApp:
+		case nix::tApp:{
+
+			if(possiblyFormatLookup(rs, path, env, state, value)) break;
+
 			if(atomic) addBrackets(rs, state);
-			formatValue<false>(rs, state.split(), *value.primOpApp().left);
-			state << " ";
-			formatValue<true>(rs, state.split(), *value.primOpApp().right);
+
+			const Value* vptr = &value;
+			do{
+				Cursor temp = state.split();
+				state << " ";
+				nix::Value* r;
+				nix::Value* l;
+				if(internalType(*vptr) == nix::tPrimOpApp){
+					r = value.primOpApp().right;
+					l = value.primOpApp().left;
+				}else{
+					r = value.app().right;
+					l = value.app().left;
+				}
+				formatValue<true>(rs, path_unreachable, env, std::move(state), *r);
+				state = std::move(temp);
+				vptr = l;
+			}while(internalType(*vptr) == nix::tPrimOpApp || internalType(*vptr) == nix::tApp);
+
+			formatValue<false>(rs, path_unreachable, env, std::move(state), *vptr);
 		}break;
 		
 		case nix::tThunk:
 		case nix::tUninitialized:
-		case nix::tApp:
-			rs.eval().error<nix::EvalError>("unexpected value").panic();
-			break;
 		case nix::tExternal:
 		case nix::tFailed:
 		case nix::tLambda:
 		case nix::tNumberOfInternalTypes:
 			rs.eval().error<nix::EvalError>("cannot serialize value").debugThrow();
 			break;
-			break;
 	}
 }
 
 // Find or create the body of the attribute set represented by the specified expression. The state will be positioned at the end of a line and the caller is expected to add a new line immediately.
-static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxReference& src, AnchorSet& anchors, bool recursive, bool forAdding){
+static Cursor findOrDeclareAttributeSet(RewriteState& state, const SyntaxReference& src, AnchorSet& anchors, bool recursive, bool forAdding){
 	const NixToken* cursor;
 	std::vector<AttributeDeclaration> decvec{};
 	nix::ExprAttrs* attrs = static_cast<nix::ExprAttrs*>(src.expression);
@@ -437,7 +641,7 @@ static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxRe
 				cursor = AttrsOpenInfo::nextOpen(info.getDoteq() + 1).getOpenBracket();
 				if(recursive){
 					if((cursor - 1)->type != NixToken::kind_type::REC){
-						FormatState rec = addRewrite(state, cursor->begin);
+						Cursor rec = addRewrite(state, cursor->begin);
 						rec << " rec ";
 					}
 				}else{
@@ -473,7 +677,7 @@ static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxRe
 
 		anchors.addAnchorForInsertLocation(insertAfter->end);
 		
-		FormatState body = addRewrite(state, insertAfter->end);
+		Cursor body = addRewrite(state, insertAfter->end);
 		body.indentInfo = detectIndentation(state, src.boundary.front().begin, src.boundary.back().end, info.getFirst()->begin);
 
 		newLine(state, body);
@@ -485,11 +689,11 @@ static FormatState findOrDeclareAttributeSet(RewriteState& state, const SyntaxRe
 		}
 		if(!forAdding){
 			body << "};";
-			return FormatState();
+			return Cursor();
 		}
 		body.indentInfo.level++;
 
-		FormatState inner = body.split();
+		Cursor inner = body.split();
 		body.indentInfo.level--;
 		newLine(state, body);
 		body << "};";
@@ -505,14 +709,14 @@ positionInsideSet:
 	anchors.addAnchorForInsertLocation(insertAfter->end);
 
 	if(!forAdding){
-		return FormatState();
+		return Cursor();
 	}
 
-	FormatState body = addRewrite(state, insertAfter->end);
+	Cursor body = addRewrite(state, insertAfter->end);
 	body.indentInfo = detectIndentation(state, begin->begin, end->end, insertAfter->end);
 
 	if(begin->end == end->begin){
-		FormatState inner = body.split();
+		Cursor inner = body.split();
 		newLine(state, body);
 		inner.indentInfo.level++;
 		return inner;
@@ -522,7 +726,7 @@ positionInsideSet:
 }
 
 // Prepare for completely rewriting the syntax. The syntax may or may not be isolated. It SHOULD NOT be an inherit/inherit-from syntax.
-static FormatState replaceSyntax(RewriteState& state, SyntaxReference src, AnchorSet& anchors){
+static Cursor replaceSyntax(RewriteState& state, SyntaxReference src, AnchorSet& anchors){
 	if(anchors.tryIsolateAndAnchor(src)){
 		return addRewrite(state, src.beginOffset(), src.endOffset());
 	}else{
@@ -531,7 +735,7 @@ static FormatState replaceSyntax(RewriteState& state, SyntaxReference src, Ancho
 
 		anchors.addAnchorForBinding(info, src);
 
-		FormatState fs;
+		Cursor fs;
 		if(info.getDoteq()->type != '='){
 			fs = addRewrite(state, (info.getDoteq() - 1)->end, info.getLast()->begin);
 			fs << " = ";
@@ -544,27 +748,37 @@ static FormatState replaceSyntax(RewriteState& state, SyntaxReference src, Ancho
 	}
 }
 
-void generatePositiveRewrites(RewriteState& state, SyntaxReference src, const Value& value, AnchorSet& anchors);
+void generatePositiveRewrites(RewriteState& state, const BasicChartValueInfo* path, const FormatEnv* env, SyntaxReference src, const Value& value, AnchorSet& anchors);
 
-template<bool mayMakeRecursive,typename BindingsT>
-void smartRewriteAttrs(RewriteState& state, SyntaxReference& src, const BindingsT& bindings, AnchorSet& anchors){
-	FormatState body;
+template<bool mayChangeRecursiveness,typename BindingsT>
+void smartRewriteAttrs(RewriteState& state, const BasicChartValueInfo* path, const FormatEnv* env, SyntaxReference& src, const BindingsT& bindings, const Value* value, AnchorSet& anchors){
+	Cursor body;
 	ExprAttrs* a = src.attrs();
-	// If we are adding new attributes, we must declare the attribute set first.
+
+	// We may change a recursive attrs to a non-recursive one because it is possible we were the original authors... except when we aren't! Which is why that template argument exists.
+
+	FormatEnv localEnv;
+	bool wantNew = false;
+	bool wantRecursive = maybeMakeFormatEnv<mayChangeRecursiveness>(state, a, localEnv, env, bindings, value);
+
+	// If we are adding new attributes, we must declare the attribute set first. This is due to rewrite ordering messing with the "rec" marker.
 	for(auto& attr : bindings){
-		if(!a->attrs->contains(attr.name)){
-			body = findOrDeclareAttributeSet(state, src, anchors, a->recursive, true);
-			break;
-		}
+		wantNew |= !a->attrs->contains(attr.name);
+	}
+	if(wantNew || (wantRecursive != a->recursive)){
+		body = findOrDeclareAttributeSet(state, src, anchors, wantRecursive, wantNew);
 	}
 	for(auto& attr : bindings){
+		BasicChartValueInfo subInfo;
+		subInfo.pathParent = wantRecursive ? path_env : path;
+		subInfo.pathName = attr.name;
 		if(a->attrs->contains(attr.name) && a->attrs->at(attr.name).chooseByKind(true, false, false)){
 			SubexpressionFrame frame;
-			generatePositiveRewrites(state, src.getSubexpression(&frame, attr.name), *attr.value, anchors);
+			generatePositiveRewrites(state, subInfo.asPtr(), env, src.getSubexpression(&frame, attr.name), *attr.value, anchors);
 		}else{
 			newLine(state, body);
 			body << STREAM(os,nix::printAttributeName(os, state.eval().symbols[attr.name])) << " = ";
-			formatValue<false>(state, body.split(), *attr.value);
+			formatValue<false>(state, subInfo.asPtr(), env, body.split(), *attr.value);
 			body << ";";
 		}
 	}
@@ -572,6 +786,49 @@ void smartRewriteAttrs(RewriteState& state, SyntaxReference& src, const Bindings
 
 static void eraseDeclaration(RewriteState& state, const AttrsDeclarationInfo& info){
 	eraseRange(state, (info.getFirst() - 1)->end, info.getLast()->end);
+}
+
+void generatePositiveRewrites(RewriteState& state, const BasicChartValueInfo* path, const FormatEnv* env, SyntaxReference expr, const Value& value, AnchorSet& anchors){
+	if(value.type() == nix::nAttrs){
+		const ExprAttrs* attrs = dynamic_cast<ExprAttrs*>(expr.expression);
+		if(!attrs){
+			goto defaultRewrite;
+		}
+		const Bindings& bindings = *value.attrs();
+		if(bindings.empty()){
+			goto defaultRewrite;
+		}
+		smartRewriteAttrs<true>(state, path, env, expr, bindings, &value, anchors);
+		return;
+	}
+
+defaultRewrite:
+
+	formatValue<false>(state, path, env, replaceSyntax(state, std::move(expr), anchors), value);
+}
+
+struct ConstAttr{
+	nix::Symbol name;
+	nix::PosIdx pos;
+	const Value* value;
+};
+
+void generatePositiveRewrites(RewriteState& state, SyntaxReference& expr, const Bindings& bindings, AnchorSet& anchors){
+	ExprAttrs* a = expr.attrs();
+	std::vector<ConstAttr> attrs;
+
+	for(auto& updateBinding : bindings){
+		if(a->attrs->contains(updateBinding.name)){
+			deeperForce(state.eval(), *updateBinding.value);
+			attrs.push_back({updateBinding.name,updateBinding.pos,state.pool.intern(updateBinding.value)});
+		}
+	}
+
+	std::sort(attrs.begin(),attrs.end(),[&](const auto& l,const auto& r){
+		return l.pos < r.pos;
+	});
+
+	smartRewriteAttrs<false>(state, path_unreachable, nullptr, expr, attrs, nullptr, anchors);
 }
 
 void generateNegativeRewrites(RewriteState &state, AttrsOpenInfo info, uint32_t depth, const AnchorSet &anchors){
@@ -635,89 +892,5 @@ void generateNegativeRewrites(RewriteState &state, AttrsOpenInfo info, uint32_t 
 		}
 	}
 };
-
-void generatePositiveRewrites(RewriteState& state, SyntaxReference expr, const Value& value, AnchorSet& anchors){
-	if(value.type() == nix::nAttrs){
-		const ExprAttrs* attrs = dynamic_cast<ExprAttrs*>(expr.expression);
-		if(!attrs){
-			goto defaultRewrite;
-		}
-		const Bindings& bindings = *value.attrs();
-		if(bindings.empty()){
-			goto defaultRewrite;
-		}
-		smartRewriteAttrs<true>(state, expr, bindings, anchors);
-		return;
-	}
-
-defaultRewrite:
-
-	formatValue<false>(state, replaceSyntax(state, std::move(expr), anchors), value);
-}
-
-/*void generatePreservingAnchors(RewriteState& state, SyntaxReference expr, AnchorSet& anchors){
-
-	uint32_t depthBeforeIsolation = expr.getPathLength();
-	if(expr.tryIsolate()){
-		anchors.addAnchor(expr.beginOffset(), depthBeforeIsolation);
-	}else{
-		for(auto d : expr.findAllDeclarations(state.eval())){
-			if(std::holds_alternative<BindingInfo>(d)){
-				BindingInfo bin = std::get<BindingInfo>(d);
-				anchors.addAnchor(bin.getDoteq()->end, depthBeforeIsolation);
-			}else{
-				const NixToken* tok = expr.binarySearchPos(expr.expression->getPos());
-				anchors.addAnchor(tok->begin, depthBeforeIsolation);
-			}
-		}
-	}
-}*/
-
-/* This remains unused until we DARE descend lists.
-// This ASSUMES the expr is isolated!
-static void generateTopLevelRewrites(RewriteState& state, SyntaxReference expr, const Value& value){
-	if(value.type() == nix::nAttrs){
-		const ExprAttrs* attrs = dynamic_cast<ExprAttrs*>(expr.expression);
-		if(!attrs){
-			goto defaultRewrite;
-		}
-		const Bindings& bindings = *value.attrs();
-		if(bindings.empty()){
-			goto defaultRewrite;
-		}
-		AnchorSet anchors;
-		generatePositiveRewrites(state, expr, value, anchors);
-		generateNegativeRewrites(state, expr, anchors);
-	}
-
-defaultRewrite:
-	
-	formatValue<false>(state, addRewrite(state, expr.beginOffset(), expr.endOffset()), value);
-}
-*/
-
-struct ConstAttr{
-	nix::Symbol name;
-	nix::PosIdx pos;
-	const Value* value;
-};
-
-void generatePositiveRewrites(RewriteState& state, SyntaxReference& expr, const Bindings& bindings, AnchorSet& anchors){
-	ExprAttrs* a = expr.attrs();
-	std::vector<ConstAttr> attrs;
-
-	for(auto& updateBinding : bindings){
-		if(a->attrs->contains(updateBinding.name)){
-			deeperForce(state.eval(), *updateBinding.value);
-			attrs.push_back({updateBinding.name,updateBinding.pos,state.pool.intern(updateBinding.value)});
-		}
-	}
-
-	std::sort(attrs.begin(),attrs.end(),[&](const auto& l,const auto& r){
-		return l.pos < r.pos;
-	});
-
-	smartRewriteAttrs<false>(state, expr, attrs, anchors);
-}
 
 }

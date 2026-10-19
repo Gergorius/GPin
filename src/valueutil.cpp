@@ -13,6 +13,7 @@
 #include <nix/util/pos-idx.hh>
 #include <nix/util/source-path.hh>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <boost/container_hash/hash.hpp>
 
@@ -171,7 +172,7 @@ static bool eqValues(VPtr l,VPtr r,std::conditional_t<doForce, nix::EvalState&, 
 #define GUARD(a,b) if(a != b){ return false; }
 #define CHK(str) (l str == r str)
 #define REC(str) (recurse((l str),(r str)))
-
+	begin:
 		if(internalType(*l) != internalType(*r)){
 			goto recovery;
 		}
@@ -197,10 +198,10 @@ static bool eqValues(VPtr l,VPtr r,std::conditional_t<doForce, nix::EvalState&, 
 			case nix::tNull: return true;
 			case nix::tThunk:
 				if(CHK(->thunk().env) && CHK(->thunk().expr)) return true;
-				break;
+				goto recovery;
 			case nix::tApp: 
 				if(REC(->app().left) && REC(->app().right)) return true;
-				break;
+				goto recovery;
 			case nix::tAttrs:{
 				GUARD(l->attrs()->size(),r->attrs()->size());
 				for(size_t i = 0;i < l->attrs()->size();i++){
@@ -209,7 +210,8 @@ static bool eqValues(VPtr l,VPtr r,std::conditional_t<doForce, nix::EvalState&, 
 						return false;
 					}
 				}
-				}break;
+				return true;
+			}
 			case nix::tListSmall:
 			case nix::tListN:{
 				GUARD(l->listSize(),r->listSize());
@@ -218,7 +220,8 @@ static bool eqValues(VPtr l,VPtr r,std::conditional_t<doForce, nix::EvalState&, 
 						return false;
 					}
 				}
-				}break;
+				return true;
+			}
 			case nix::tLambda: return CHK(->lambda().env) && CHK(->lambda().fun);
 			case nix::tPrimOp: return CHK(->primOp());
 			case nix::tPrimOpApp: return REC(->primOpApp().left) && REC(->primOpApp().right);
@@ -230,19 +233,25 @@ static bool eqValues(VPtr l,VPtr r,std::conditional_t<doForce, nix::EvalState&, 
 				}else{
 					return le == re;
 				}
-			}break;
+			}
 			case nix::tFailed:
 			case nix::tUninitialized:
 			case nix::tNumberOfInternalTypes:
-				break;
+				goto recovery;
 		}
 	recovery:
 		if constexpr(doForce){
+			bool eitherForced = false;
 			if(l->isThunk()){
 				state.forceValue(*l, nix::noPos);
+				eitherForced = true;
 			}
 			if(r->isThunk()){
 				state.forceValue(*r, nix::noPos);
+				eitherForced = true;
+			}
+			if(eitherForced){
+				goto begin;
 			}
 		}
 		return false;
@@ -308,7 +317,7 @@ void deeperForce(nix::EvalState& state, nix::Value& value){
 				break;
 			case nix::tApp:
 			case nix::tThunk:
-				state.error<nix::EvalError>("EvalState::force resulted in a thunk...?").panic();
+				nix::panic("EvalState::forceValue resulted in a thunk");
 				break;
 			case nix::tUninitialized:
 			case nix::tInt:
@@ -327,10 +336,17 @@ void deeperForce(nix::EvalState& state, nix::Value& value){
 	}(&value);
 }
 
+// Prevents intern from mutating input values at the cost of more memory usage.
+#define INTERN_NO_SIDE_EFFECTS
+
 std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* value){
 
 	// return.first: Pointer to canonical value.
+#ifdef INTERN_NO_SIDE_EFFECTS
+	// return.second: Whether the canonical value is by-pointer equal to the parameter value.
+#else
 	// return.second: Whether the canonical value is a PERFECT copy of the argument value. (Perfect means nix code cannot observe the difference.)
+#endif
 
 	const PoolPtr* p;
 	bool perfect;
@@ -341,6 +357,13 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 	}
 
 #define PREP_REPLACEMENT if(!perfect){ perfect = p->value == value; break; } p->value = state.allocValue(); (*p->value) = *value
+
+// Break-on-perfect-replacement.
+#ifdef INTERN_NO_SIDE_EFFECTS
+#define CHECK if(perfect){ p->value = value; break; }
+#else
+#define CHECK if(perfect){ p->value = value; }
+#endif
 
 #define REC(n,v) nix::Value* n; if(perfect){ std::tie(n,perfect) = recursiveIntern(v); }else{ n = recursiveIntern(v).first; }
 
@@ -355,9 +378,8 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 			REC(l,value->primOpApp().left);
 			REC(r,value->primOpApp().right);
 
-			if(perfect){
-				p->value = value;
-			}
+			CHECK;
+
 			p->value->mkPrimOpApp(l, r);
 		}break;
 
@@ -367,9 +389,9 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 
 			REC(l,value->app().left);
 			REC(r,value->app().right);
-			if(perfect){
-				p->value = value;
-			}
+			
+			CHECK;
+
 			p->value->mkApp(l, r);
 		}break;
 
@@ -383,9 +405,9 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 				REC(v,value->listView()[i]);
 				builder.elems[i] = v;
 			}
-			if(perfect){
-				p->value = value;
-			}
+
+			CHECK;
+
 			p->value->mkList(builder);
 		}break;
 
@@ -393,18 +415,18 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 
 			PREP_REPLACEMENT;
 
-			nix::Bindings* newBindings = state.mem.allocBindings(value->attrs()->size());
-			newBindings->pos = value->attrs()->pos;
+			nix::BindingsBuilder newBindings = state.buildBindings(value->attrs()->size());
+
 			for(size_t i = 0;i < value->attrs()->size();i++){
 				nix::Attr a = (*value->attrs())[i];
 				REC(v, a.value);
 				a.value = v;
-				newBindings->push_back(a);
+				newBindings.push_back(a);
 			}
-			if(perfect){
-				p->value = value;
-			}
-			p->value->mkAttrs(newBindings);
+			
+			CHECK;
+
+			p->value->mkAttrs(newBindings.alreadySorted());
 		}break;
 
 		// Deduplicating values that do not compare equal to themselves (according to nix! Not according to us.) produces an observable side effect.
@@ -423,8 +445,10 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 
 		case nix::tString:
 #ifndef EQ_CONSIDERS_STRING_CONTEXT
+#ifndef INTERN_NO_SIDE_EFFECTS
 			perfect = stringContextEq(p->value,value);
 			break;
+#endif
 #endif
 		
 		// The following values can be deduplicated just fine.
@@ -441,14 +465,92 @@ std::pair<nix::Value*,bool> NixValueInternPool::recursiveIntern(nix::Value* valu
 
 		case nix::tUninitialized:
 		case nix::tNumberOfInternalTypes:
-			state.error<nix::EvalError>("Bad value!").panic();
+			nix::panic("unexpected value kind");
 			break;
 	}
+#ifdef INTERN_NO_SIDE_EFFECTS
+	return { p->value, p->value == value };
+#else
 	return { p->value, perfect };
+#endif
 }
 
 const nix::Value* NixValueInternPool::intern(nix::Value* value){
 	return recursiveIntern(value).first;
+}
+
+bool NixValueCycles::checkForCycle(const nix::Value* v){
+	NixValueCycles& self = *this;
+	{
+		auto ires = self.find(v);
+		if(ires != self.end()){
+			return ires->second;
+		}
+	}
+	static constexpr uint32_t not_entered_yet       = 0xFFFFFFFFu;
+	static constexpr uint32_t not_entered_currently = 0xFFFFFFFEu;
+	struct v_info{
+		uint32_t depth;
+		bool cycle;
+	};
+	std::unordered_map<const nix::Value*, v_info> seen;
+
+	[&](this const auto& recurse, const nix::Value* value,uint32_t depth){
+		v_info& info = seen.insert({value, {not_entered_yet, false}}).first->second;
+		if(info.depth != not_entered_yet && info.depth != not_entered_currently){
+			return info.depth;
+		}
+		if(info.depth == not_entered_yet && self.contains(value)){
+			info.depth = 0;
+			return not_entered_currently;
+		}
+		info.depth = depth;
+		uint32_t cycleDepth = depth + 1;
+		switch(internalType(*value)){
+			case nix::tAttrs:
+				for(auto& a : *value->attrs()){
+					cycleDepth = std::min(cycleDepth, recurse(a.value,depth + 1));
+				}
+				break;
+			case nix::tListSmall:
+			case nix::tListN:
+				for(nix::Value* a : value->listView()){
+					cycleDepth = std::min(cycleDepth, recurse(a,depth + 1));
+				}
+				break;
+			case nix::tPrimOpApp:
+				cycleDepth = std::min(cycleDepth, recurse(value->primOpApp().left, depth + 1));
+				cycleDepth = std::min(cycleDepth, recurse(value->primOpApp().right, depth + 1));
+				break;
+			case nix::tApp:
+				cycleDepth = std::min(cycleDepth, recurse(value->app().left, depth + 1));
+				cycleDepth = std::min(cycleDepth, recurse(value->app().right, depth + 1));
+				break;
+			case nix::tUninitialized:
+			case nix::tInt:
+			case nix::tBool:
+			case nix::tNull:
+			case nix::tFloat:
+			case nix::tFailed:
+			case nix::tExternal:
+			case nix::tPrimOp:
+			case nix::tThunk:
+			case nix::tLambda:
+			case nix::tString:
+			case nix::tPath:
+			case nix::tNumberOfInternalTypes:
+				break;
+		}
+		info.cycle |= cycleDepth <= depth;
+		info.depth = not_entered_currently;
+		return cycleDepth;
+	}(v, 1);
+
+	for(auto report : seen){
+		self.insert({report.first,report.second.cycle});
+	}
+
+	return self[v];
 }
 
 }
