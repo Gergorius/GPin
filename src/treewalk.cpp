@@ -2,6 +2,7 @@
 #include "treewalk.h"
 #include "altparse.h"
 #include "exprutil.h"
+#include <cstdint>
 #include <nix/expr/nixexpr.hh>
 #include <nix/expr/value.hh>
 #include <nix/util/error.hh>
@@ -195,43 +196,37 @@ struct CollectPositions{
 };
 
 bool SyntaxReference::isOnlyDefinitionInDynamic() const{
-	const AttrPathNode* node = path;
-	while(node != nullptr){
-		if(node->name.symbol){
-			if(node->getAttrs()->pos != nix::noPos){
+	const SyntaxReference* ptr = this;
+	while(ptr->parent != nullptr){
+		if(std::holds_alternative<nix::Symbol>(ptr->name)){
+			if(ptr->parent->attrs()->pos != nix::noPos){
 				return false;
 			}
 		}else{
 			return true;
 		}
-		node = node->parent;
+		ptr = ptr->parent;
 	}
 	return false;
 }
 
 bool SyntaxReference::tryIsolate(){
-	if(path == nullptr){
+	if(parent == nullptr){
 		return true;
 	}
 	nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(this->expression);
 	if(attrs == nullptr || attrs->pos != nix::noPos && isOnlyDefinitionInDynamic()){
 		nix::PosIdx pos;
-		nix::ExprAttrs* parent = path->getAttrs();
+		nix::ExprAttrs* pAttrs = parent->attrs();
 
-		if(path->name.symbol){
-			nix::ExprAttrs::AttrDef& def = parent->attrs.value()[path->name.symbol];
+		if(std::holds_alternative<nix::Symbol>(name)){
+			nix::ExprAttrs::AttrDef& def = pAttrs->attrs.value()[std::get<nix::Symbol>(name)];
 			if(def.chooseByKind(false, true, true)){
 				return false; // An inherit cannot be isolated.
 			}
 			pos = def.pos;
 		}else{
-			for(auto& dynAttr : parent->dynamicAttrs.value()){
-				if(dynAttr.valueExpr == this->expression){
-					pos = dynAttr.pos;
-					goto doTraverse;
-				}
-			}
-			// Error: Not found. This should not be possible.
+			pos = pAttrs->dynamicAttrs.value().at(std::get<uint32_t>(name)).pos;
 		}
 	doTraverse:
 		const NixToken* cursor = binarySearchPos(pos);
@@ -240,7 +235,8 @@ bool SyntaxReference::tryIsolate(){
 		const NixToken* begin = cursor;
 		walkToToken(cursor, ';');
 		pathLength = 0;
-		path = nullptr;
+		parent = nullptr;
+		name = no_name;
 		boundary = { begin, cursor};
 		return true;
 	}
@@ -346,12 +342,8 @@ SyntaxReference SyntaxReference::getBody(){
 	}
 }
 
-SyntaxReference SyntaxReference::getSubexpression(SubexpressionFrame* frame,nix::Symbol name){
-	AttrPathNode* pathNode = &frame->node;
-	pathNode->parent = this->path;
-	pathNode->expr = this->expression;
-	pathNode->name = name;
-	nix::ExprAttrs* expr = pathNode->getAttrs();
+SyntaxReference SyntaxReference::getSubexpression(nix::Symbol name) const{
+	nix::ExprAttrs* expr = this->attrs();
 	nix::Expr* sub = expr->attrs->at(name).e;
 	return SyntaxReference(
 		RawSyntaxReference{
@@ -360,17 +352,14 @@ SyntaxReference SyntaxReference::getSubexpression(SubexpressionFrame* frame,nix:
 			.expression = sub
 		},
 		pathLength + 1,
-		pathNode
+		this,
+		name
 	);
 }
 
-SyntaxReference SyntaxReference::getDynamicSubexpression(SubexpressionFrame* frame,uint32_t index){
-	AttrPathNode* pathNode = &frame->node;
-	nix::ExprAttrs* expr = dynamic_cast<nix::ExprAttrs*>(expression);
+SyntaxReference SyntaxReference::getDynamicSubexpression(uint32_t index) const{
+	nix::ExprAttrs* expr = static_cast<nix::ExprAttrs*>(expression);
 	auto& se = expr->dynamicAttrs->at(index);
-	pathNode->parent = this->path;
-	pathNode->expr = this->expression;
-	pathNode->name = se.nameExpr;
 	return SyntaxReference(
 		RawSyntaxReference{
 			.origin = origin,
@@ -378,7 +367,8 @@ SyntaxReference SyntaxReference::getDynamicSubexpression(SubexpressionFrame* fra
 			.expression = se.valueExpr
 		},
 		pathLength + 1,
-		pathNode
+		this,
+		index
 	);
 }
 
@@ -413,7 +403,8 @@ std::optional<SyntaxReference> SyntaxReference::getInheritFromExpression(uint32_
 			.expression = fromExpr
 		},
 		0,
-		nullptr
+		nullptr,
+		no_name
 	);
 }
 
@@ -468,17 +459,12 @@ std::vector<AttributeDeclaration> SyntaxReference::findMemberDeclarationsContain
 std::vector<AttributeDeclaration> SyntaxReference::findAllDeclarations() const{
 	std::set<uint32_t> positions{};
 
-	nix::ExprAttrs* parent = path->getAttrs();
-	if(path->name.symbol){
-		nix::ExprAttrs::AttrDef& def = parent->attrs.value()[path->name.symbol];
+	nix::ExprAttrs* pAttrs = parent->attrs();
+	if(std::holds_alternative<nix::Symbol>(name)){
+		nix::ExprAttrs::AttrDef& def = pAttrs->attrs.value()[std::get<nix::Symbol>(name)];
 		positions.insert(origin.offsetOf(def.pos));
 	}else{
-		for(auto& dynAttr : parent->dynamicAttrs.value()){
-			if(dynAttr.valueExpr == this->expression){
-				positions.insert(origin.offsetOf(dynAttr.pos));
-				break;
-			}
-		}
+		positions.insert(origin.offsetOf(pAttrs->dynamicAttrs->at(std::get<uint32_t>(name)).pos));
 	}
 
 	const nix::ExprAttrs* attrs = dynamic_cast<nix::ExprAttrs*>(this->expression);

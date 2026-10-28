@@ -12,6 +12,7 @@
 #include <nix/util/fmt.hh>
 #include <nix/util/pos-idx.hh>
 #include <nix/util/source-path.hh>
+#include <stack>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -40,6 +41,32 @@ InternalType internalType(const nix::Value& v){
 
 #pragma clang diagnostic error "-Wswitch"
 #pragma clang diagnostic error "-Wimplicit-fallthrough"
+
+static void unusedButMustCompile(nix::Value& value){
+
+	// Due to the warnings we just set if the enumeration changes this will produce a compile time error.
+
+	switch(internalType(value)){
+		case nix::tUninitialized:
+		case nix::tInt:
+		case nix::tBool:
+		case nix::tNull:
+		case nix::tFloat:
+		case nix::tFailed:
+		case nix::tExternal:
+		case nix::tPrimOp:
+		case nix::tAttrs:
+		case nix::tListSmall:
+		case nix::tPrimOpApp:
+		case nix::tApp:
+		case nix::tThunk:
+		case nix::tLambda:
+		case nix::tListN:
+		case nix::tString:
+		case nix::tPath:
+		case nix::tNumberOfInternalTypes:
+	}
+}
 
 size_t NixValueComparer::hash(const nix::Value* vptr){
 	size_t sum = std::hash<nix::ValueType>{}(vptr->type()) * 31;
@@ -90,11 +117,7 @@ size_t NixValueComparer::hash(const nix::Value* vptr){
 				sum = (sum + std::hash<nix::ValueType>{}(elem->type())) * 31;
 			}
 			break;
-		case nix::tUninitialized:
-		case nix::tFailed:
-		case nix::tNull:
-		case nix::tApp:
-		case nix::tNumberOfInternalTypes:
+		default:
 			break;
 	}
 	return sum;
@@ -122,18 +145,7 @@ begin:
 		case nix::tThunk:
 			state.forceValue(value, nix::noPos);
 			goto begin;
-		case nix::tUninitialized:
-		case nix::tInt:
-		case nix::tBool:
-		case nix::tNull:
-		case nix::tFloat:
-		case nix::tFailed:
-		case nix::tExternal:
-		case nix::tPrimOp:
-		case nix::tLambda:
-		case nix::tString:
-		case nix::tPath:
-		case nix::tNumberOfInternalTypes:
+		default:
 			break;
 	}
 }
@@ -319,18 +331,7 @@ void deeperForce(nix::EvalState& state, nix::Value& value){
 			case nix::tThunk:
 				nix::panic("EvalState::forceValue resulted in a thunk");
 				break;
-			case nix::tUninitialized:
-			case nix::tInt:
-			case nix::tBool:
-			case nix::tNull:
-			case nix::tFloat:
-			case nix::tFailed:
-			case nix::tExternal:
-			case nix::tPrimOp:
-			case nix::tLambda:
-			case nix::tString:
-			case nix::tPath:
-			case nix::tNumberOfInternalTypes:
+			default:
 				break;
 		}
 	}(&value);
@@ -479,78 +480,69 @@ const nix::Value* NixValueInternPool::intern(nix::Value* value){
 	return recursiveIntern(value).first;
 }
 
-bool NixValueCycles::checkForCycle(const nix::Value* v){
-	NixValueCycles& self = *this;
+uint32_t NixValueTopology::lookupTopologyIndex(const nix::Value* ptr){
 	{
-		auto ires = self.find(v);
-		if(ires != self.end()){
-			return ires->second;
+		auto itr = componentIdMap.find(ptr);
+		if(itr != componentIdMap.end()){
+			return itr->second;
+		}
+		if(!isCompoundValue(ptr)){
+			return 0;
 		}
 	}
-	static constexpr uint32_t not_entered_yet       = 0xFFFFFFFFu;
-	static constexpr uint32_t not_entered_currently = 0xFFFFFFFEu;
-	struct v_info{
-		uint32_t depth;
-		bool cycle;
+
+	std::stack<const nix::Value*> stack;
+
+	struct ComponentValueInfo{
+		uint32_t id;
+		uint32_t low;
+		bool inStack;
 	};
-	std::unordered_map<const nix::Value*, v_info> seen;
 
-	[&](this const auto& recurse, const nix::Value* value,uint32_t depth){
-		v_info& info = seen.insert({value, {not_entered_yet, false}}).first->second;
-		if(info.depth != not_entered_yet && info.depth != not_entered_currently){
-			return info.depth;
-		}
-		if(info.depth == not_entered_yet && self.contains(value)){
-			info.depth = 0;
-			return not_entered_currently;
-		}
-		info.depth = depth;
-		uint32_t cycleDepth = depth + 1;
-		switch(internalType(*value)){
-			case nix::tAttrs:
-				for(auto& a : *value->attrs()){
-					cycleDepth = std::min(cycleDepth, recurse(a.value,depth + 1));
-				}
-				break;
-			case nix::tListSmall:
-			case nix::tListN:
-				for(nix::Value* a : value->listView()){
-					cycleDepth = std::min(cycleDepth, recurse(a,depth + 1));
-				}
-				break;
-			case nix::tPrimOpApp:
-				cycleDepth = std::min(cycleDepth, recurse(value->primOpApp().left, depth + 1));
-				cycleDepth = std::min(cycleDepth, recurse(value->primOpApp().right, depth + 1));
-				break;
-			case nix::tApp:
-				cycleDepth = std::min(cycleDepth, recurse(value->app().left, depth + 1));
-				cycleDepth = std::min(cycleDepth, recurse(value->app().right, depth + 1));
-				break;
-			case nix::tUninitialized:
-			case nix::tInt:
-			case nix::tBool:
-			case nix::tNull:
-			case nix::tFloat:
-			case nix::tFailed:
-			case nix::tExternal:
-			case nix::tPrimOp:
-			case nix::tThunk:
-			case nix::tLambda:
-			case nix::tString:
-			case nix::tPath:
-			case nix::tNumberOfInternalTypes:
-				break;
-		}
-		info.cycle |= cycleDepth <= depth;
-		info.depth = not_entered_currently;
-		return cycleDepth;
-	}(v, 1);
+	std::unordered_map<const nix::Value*,ComponentValueInfo> data;
 
-	for(auto report : seen){
-		self.insert({report.first,report.second.cycle});
-	}
+	constexpr uint32_t highIndex = 0xFFFFFFFFu;
 
-	return self[v];
+	[&](this const auto& recurse, const nix::Value* value) -> uint32_t {
+		if(!isCompoundValue(value)){
+			return highIndex;
+		}
+		auto [itr, inserted] = data.insert({value, ComponentValueInfo{.id = (uint32_t)data.size(), .low = (uint32_t)data.size(), .inStack = true}});
+		ComponentValueInfo& info = itr->second;
+		if(!inserted){
+			return info.inStack ? info.low : highIndex;
+		}
+		if(componentIdMap.contains(value)){
+			info.inStack = false;
+			return highIndex;
+		}
+		stack.push(value);
+		bool referencesSelf = false;
+		visitSubvalues(value, [&](const nix::Value* value2){
+			referencesSelf |= value2 == value;
+			info.low = std::min(info.low,recurse(value2));
+			return false;
+		});
+		if(info.low == info.id){
+			if(stack.top() == value && !referencesSelf){
+				stack.pop();
+				componentIdMap.insert({value,this->idCounter * 2});
+			}else{
+				const nix::Value* value2;
+				do{
+					value2 = stack.top();
+					stack.pop();
+					ComponentValueInfo& info2 = data.at(value2);
+					info2.inStack = false;
+					componentIdMap.insert({value2,this->idCounter * 2 + 1});
+				}while(value2 != value);
+			}
+			this->idCounter++;
+		}
+		return info.low;
+	}(ptr);
+
+	return componentIdMap.at(ptr);
 }
 
 }

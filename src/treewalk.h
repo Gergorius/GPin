@@ -5,6 +5,7 @@
 #include <nix/expr/eval.hh>
 #include <nix/expr/symbol-table.hh>
 #include <nix/util/pos-idx.hh>
+#include <nix/util/util.hh>
 #include <span>
 
 #include <nix/expr/nixexpr.hh>
@@ -15,26 +16,6 @@
 #include "altparse.h"
 
 namespace gpin{
-
-struct AttrPathNode{
-	const AttrPathNode* parent;
-	// This will either be an ExprAttrs or an ExprLet.
-	nix::Expr* expr;
-	nix::AttrName name; // Dynamic attributes can also be nested.
-	AttrPathNode(): parent(nullptr), expr(nullptr), name(nullptr){}
-	inline nix::ExprAttrs* getAttrs() const{
-		nix::ExprLet* let = dynamic_cast<nix::ExprLet*>(expr);
-		return let == nullptr ? dynamic_cast<nix::ExprAttrs*>(expr) : let->attrs;
-	}
-};
-
-union SubexpressionFrame{
-	friend struct SyntaxReference;
-	SubexpressionFrame(){}
-private:
-	char raw[sizeof(AttrPathNode)];
-	AttrPathNode node;
-};
 
 // IF the pointer is looking at a token that is known to be paired with some closing token (brackets, LET/IN, WITH/';' or others) walk to the closing token. This method is meant to help with locating the end of expressions which is usually a semicolon or closing bracket that was unaccounted for.
 bool maybeWalkToClosingToken(const NixToken*& ptr);
@@ -187,33 +168,38 @@ It is possible for attribute sets to not have an isolated form because they can 
 */
 struct SyntaxReference : RawSyntaxReference{
 private:
+	using name_type = std::variant<nix::Symbol,uint32_t>;
+	static constexpr name_type no_name = 0xFFFFFFFFu;
 	uint32_t pathLength;
-	const AttrPathNode* path;
-	inline SyntaxReference(const RawSyntaxReference& t, uint32_t pl, const AttrPathNode* p): RawSyntaxReference(t), pathLength(pl), path(p){}
+	const SyntaxReference* parent;
+	name_type name;
+	inline SyntaxReference(const RawSyntaxReference& t, uint32_t pl, const SyntaxReference* p, name_type n): RawSyntaxReference(t), pathLength(pl), parent(p), name(n){}
 public:
-	inline explicit SyntaxReference(const RawSyntaxReference& t): RawSyntaxReference(t), pathLength(0), path(nullptr){}
+	inline explicit SyntaxReference(const RawSyntaxReference& t): RawSyntaxReference(t), pathLength(0), parent(nullptr), name(no_name){}
 	SyntaxReference(const SyntaxReference&) = delete;
 	SyntaxReference& operator=(const SyntaxReference&) = delete;
 	SyntaxReference(SyntaxReference&&) = default;
 	SyntaxReference& operator=(SyntaxReference&&) = delete;
 	inline uint32_t getPathLength() const{ return pathLength; }
 	// Get the parent syntax reference for this non-isolated syntax.
-	inline const SyntaxReference getParent() const{
-		return SyntaxReference(RawSyntaxReference{
-			.origin = origin,
-			.boundary = boundary,
-			.expression = path->expr
-		}, pathLength - 1, path->parent);
+	inline const SyntaxReference& getParent() const{
+		return *parent;
 	}
 	// Returns the nix attribute name of this non-isolated SyntaxReference.
-	inline const nix::AttrName& getName() const{ return path->name; }
+	inline nix::AttrName getName() const{
+		return std::visit(nix::overloaded{
+			[&](const nix::Symbol& sym) -> nix::AttrName { return nix::AttrName(sym); },
+			[&](const uint32_t& index) -> nix::AttrName { return nix::AttrName(parent->attrs()->dynamicAttrs->at(index).nameExpr); },
+			[&](std::monostate mst) -> nix::AttrName { return nix::AttrName(nullptr); }
+			}, name);
+		}
 	// Is this an isolated syntax reference?
 	inline bool isIsolated() const{
-		return path == nullptr;
+		return parent == nullptr;
 	}
 	// Is this syntax reference an inherit selector?
 	inline bool isInherit() const{
-		return path != nullptr && path->name.symbol && path->getAttrs()->attrs.value().at(path->name.symbol).chooseByKind(false, true, true);
+		return parent != nullptr && std::holds_alternative<nix::Symbol>(name) && parent->attrs()->attrs.value().at(std::get<nix::Symbol>(name)).chooseByKind(false, true, true);
 	}
 	// Are we the only definition inside a dynamic attribute value?
 	bool isOnlyDefinitionInDynamic() const;
@@ -221,8 +207,8 @@ public:
 	// Returns the body ASSUMING this is an isolated ExprLet or ExprWith.
 	SyntaxReference getBody();
 	// Get a reference to a subexpression of this ExprAttrs or ExprLet which may not be dynamic.
-	SyntaxReference getSubexpression(SubexpressionFrame* frame,nix::Symbol name);
-	SyntaxReference getDynamicSubexpression(SubexpressionFrame* frame,uint32_t index);
+	SyntaxReference getSubexpression(nix::Symbol name) const;
+	SyntaxReference getDynamicSubexpression(uint32_t index) const;
 	// Find the inherit-from expression at the specific index.
 	std::optional<SyntaxReference> getInheritFromExpression(uint32_t index);
 	// Find all member declarations that contain at least one position from a set of positions.

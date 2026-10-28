@@ -101,7 +101,8 @@ void GPinCommand::run(ref<nix::Store>){
 
 		state->finishLoad();
 
-		state->doRewrite(std::cout, info);
+		RewriteCache cache{*state};
+		state->doRewrite(cache, std::cout, info);
 		std::cout.flush();
 	}else{
 		for(std::string tf : targetFiles){
@@ -116,16 +117,19 @@ void GPinCommand::run(ref<nix::Store>){
 
 		bool hasSoftError = false;
 
-		for(auto& pairing : state->fileSources){
-			const nix::SourcePath& sp = pairing.first;
-			auto physicalPath = sp.getPhysicalPath();
-			if(!physicalPath){
-				std::cerr << "Error: could not resolve path for writing: " << sp.to_string() << std::endl;
-				hasSoftError = true;
+		{
+			RewriteCache cache{*state};
+			for(auto& pairing : state->fileSources){
+				const nix::SourcePath& sp = pairing.first;
+				auto physicalPath = sp.getPhysicalPath();
+				if(!physicalPath){
+					std::cerr << "Error: could not resolve path for writing: " << sp.to_string() << std::endl;
+					hasSoftError = true;
+				}
+				std::ostringstream ostr;
+				state->doRewrite(cache, ostr, pairing.second);
+				writeTasks.push_back({std::move(physicalPath).value(), std::move(ostr).str()});
 			}
-			std::ostringstream ostr;
-			state->doRewrite(ostr, pairing.second);
-			writeTasks.push_back({std::move(physicalPath).value(), std::move(ostr).str()});
 		}
 
 		if(hasSoftError){
@@ -141,8 +145,8 @@ void GPinCommand::run(ref<nix::Store>){
 }
 
 void mainWrapped(int argc, char** argv){
-	nix::evalSettings.enableImportFromDerivation.setDefault(true); // Option: allow-import-from-derivation
-	nix::evalSettings.enableNativeCode.setDefault(true); // Option: allow-unsafe-native-code-during-evaluation
+	// nix::evalSettings.enableImportFromDerivation.setDefault(true); // Option: allow-import-from-derivation
+	// nix::evalSettings.enableNativeCode.setDefault(true); // Option: allow-unsafe-native-code-during-evaluation
 	
 	GPinCommand command("gpin-update");
 
