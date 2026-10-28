@@ -2,8 +2,7 @@
 
 #include "altparse.h"
 #include "greedy.h"
-#include "treewalk.h"
-#include "valueutil.h"
+#include "rewrite.h"
 
 #include <boost/container_hash/hash.hpp>
 #include <boost/unordered/concurrent_flat_map_fwd.hpp>
@@ -42,11 +41,6 @@ struct SourceInfo{
 };
 
 struct EvalStateForUpdate : EvalState{
-
-	// This pool is EXCLUSIVELY for deeperForce'd nix values. DO NOT intern a value that was not deeperForced. (See deeperForce in "valueutil.h")
-	NixValueInternPool pool = NixValueInternPool(*this);
-	NixValueCycles cycles = NixValueCycles();
-
 	using EvalState::EvalState;
 
 
@@ -69,7 +63,7 @@ struct EvalStateForUpdate : EvalState{
 	// Call this after all load operations are performed. This evaluates all loaded attribute sets.
 	void finishLoad();
 
-	bool doRewrite(std::ostream& out, const SourceInfo& sourceInfo);
+	bool doRewrite(RewriteCache& formatCache, std::ostream& out, const SourceInfo& sourceInfo);
 };
 
 struct RecordedExprAttrs : nix::ExprAttrs{

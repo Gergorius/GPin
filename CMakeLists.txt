@@ -31,6 +31,7 @@ target_sources(gpin-update
 		src/treewalk.cpp
 		src/update.cpp
 		src/valueutil.cpp
+		src/rewrite.cpp
 		src/main.cpp
 )
 

@@ -22,7 +22,6 @@ let
 					nix-expr
 					nix-cmd
 				];
-				postInstall = "env > $out/env.txt";
 				doCheck = true;
 			};
 

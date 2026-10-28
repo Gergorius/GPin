@@ -43,6 +43,18 @@
 	app_right = (x: x.jiji * 5) ({ jiji = 5; update.jiji = 15; });
 	check.app_right = v: v == 75;
 
+	pipel_left = (rec { coeff = 2; update.coeff = 3; fun = v: v * coeff; }).fun <| 7;
+	check.pipel_left = v: v == 21;
+
+	pipel_right = (x: x.jiji * 4) <| ({ jiji = 6; update.jiji = 16; });
+	check.pipel_right = v: v == 64;
+
+	piper_left = ({ jiji = 5; update.jiji = 19; }) |> (x: x.jiji * 7);
+	check.piper_left = v: v == 133;
+
+	piper_right = 12 |> (rec { coeff = 5; update.coeff = 4; fun = v: v * coeff; }).fun;
+	check.piper_right = v: v == 48;
+
 	attr_path_base = { water = null; update.water = "sink"; }.water;
 	check.attr_path_base = v: v == "sink";
 

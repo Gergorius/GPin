@@ -55,13 +55,13 @@ using namespace mod;
 
 // These expressions are fully evaluated when maybeThunk is called.
 
-MK_EVAL_GREEDY(ExprAttrs);  // Note that evaluating attrs results in the evaluation of the dynamic attribute names.
 MK_EVAL_GREEDY(ExprList);
 MK_EVAL_GREEDY(ExprLambda); // Lacks a maybeThunk implementation.
 MK_EVAL_GREEDY(ExprPos);    // Lacks a maybeThunk implementation.
 
 // These expressions have specialised implementations
 
+//MK_RAW_GREEDY(ExprAttrs); // ExprAttrs has no proper implementation.
 MK_RAW_GREEDY(ExprCall); // Converted to a series of app thunks.
 MK_RAW_GREEDY(ExprAssert); // Uses our special thunk sauce but has a special case for equality.
 
