@@ -36,8 +36,7 @@ using todo_call = void (EvalStateWithGreedy&);
 
 template<typename T>
 struct Greedy : T{
-	Greedy() = delete;
-	Greedy(const Greedy&) = delete;
+	static_assert(false, "Greedy must be specialised.");
 };
 
 #ifndef MK_GREEDY

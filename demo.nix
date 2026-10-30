@@ -1,5 +1,5 @@
 
-# Run gpin-update on this to see how it works.
+# Run gpin-update on this to see how it works. For example: gpin-update demo.nix
 
 rec {
 	# Example 1: Update to the latest revision.

@@ -13,10 +13,11 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
-#pragma clang diagnostic error "-Wswitch"
-#pragma clang diagnostic error "-Wimplicit-fallthrough"
+#pragma GCC diagnostic error "-Wswitch"
+#pragma GCC diagnostic error "-Wimplicit-fallthrough"
 
 namespace gpin{
 
@@ -28,8 +29,8 @@ struct BasicChartValueInfo{
 	BasicChartValueInfo(){}
 };
 
-static const BasicChartValueInfo root_store = BasicChartValueInfo();
 static const BasicChartValueInfo* path_unreachable = nullptr;
+static const BasicChartValueInfo root_store = BasicChartValueInfo();
 static const BasicChartValueInfo* path_env = &root_store;
 
 bool samePath(const BasicChartValueInfo* left, const BasicChartValueInfo* right){
@@ -40,6 +41,19 @@ bool samePath(const BasicChartValueInfo* left, const BasicChartValueInfo* right)
 		return false;
 	}
 	return left->pathName == right->pathName && samePath(left->pathParent, right->pathParent);
+}
+
+bool isSubpath(const BasicChartValueInfo* base, const BasicChartValueInfo* extended){
+	while(true){
+		if(samePath(base, extended)){
+			return true;
+		}
+		if(extended == path_env || extended == path_unreachable){
+			return false;
+		}
+		extended = extended->pathParent;
+	}
+	return false;
 }
 
 struct ChartValueInfo : BasicChartValueInfo{
@@ -147,6 +161,7 @@ static void chart(ChartContext& context, const Value* value, ChartValueInfo& inf
 // Reverse environment used for substituting values.
 struct FormatEnv{
 	friend const ChartValueInfo* lookup(const FormatEnv* env, const Value* vptr, bool direct);
+	friend void getAllSymbols(const FormatEnv* env, std::unordered_set<nix::Symbol>& target);
 	friend bool wasMadeRecursive(const FormatEnv* env, const Value* vptr);
 	const Value* definedForValue;
 private:
@@ -184,9 +199,6 @@ private:
 public:
 	FormatEnv(): parent(nullptr){}
 	FormatEnv(const FormatEnv* p): parent(p){}
-	bool containsSymbol(nix::Symbol symbol) const{
-		return data.contains(symbol);
-	}
 	bool addSymbol(FormatState& state, nix::Symbol symbol, const Value* value){
 		auto itr = data.insert({symbol, {value, {}}});
 		std::unordered_map<const Value*, ChartValueInfo>& paths = itr.first->second.second;
@@ -209,6 +221,15 @@ public:
 		return !paths.empty();
 	}
 };
+
+void getAllSymbols(const FormatEnv* env, std::unordered_set<nix::Symbol>& target){
+	while(env != nullptr){
+		for(auto& p : env->data){
+			target.insert(p.first);
+		}
+		env = env->parent;
+	}
+}
 
 // Was this value already made recursive?
 bool wasMadeRecursive(const FormatEnv* env, const Value* vptr){
@@ -254,28 +275,6 @@ static bool possiblyFormatLookup(FormatState& rs, const BasicChartValueInfo* pat
 		return false;
 	}
 }
-
-static nix::Symbol generateSymbol(nix::SymbolTable& table){
-	uint32_t id = 0;
-	std::string s;
-	while(true){
-		s.clear();
-		s += "rec";
-		s += std::to_string(id);
-		
-		// SymbolTable provides no way to tell whether a symbol exists. We want to add a new symbol so we check the before-after size to test if we succeeded. The reason we want to add a new symbol is to ensure it will result in unique variables that can not be hidden. By the point this method is called, the value tree is fully evaluated.
-
-		uint32_t preSize = table.totalSize();
-		nix::Symbol newSymbol = table.create(s);
-		uint32_t postSize = table.totalSize();
-
-		if(preSize != postSize){
-			return newSymbol;
-		}
-		id++;
-	}
-}
-
 
 static bool isPApp(const nix::Value& v){
 	return v.isApp() || v.isPrimOpApp();
@@ -412,19 +411,28 @@ static void formatValue(RewriteState& state, const BasicChartValueInfo* path, co
 			if(!skipCSE && !wasMadeRecursive(env, &value)){
 				bool wantRecursive = false;
 				{
-					bool useLet = false;
 					struct enc_info{
 						uint32_t count = 0;
 						bool reachable = false;
 						enc_info(){}
 					};
 					std::unordered_map<const nix::Value*, enc_info> encounters;
+					std::unordered_set<nix::Symbol> seenSymbols;
 
 					[&](this const auto& recurse, const Value* vptr, bool reachable, bool count){
+						const BasicChartValueInfo* xpath = lookup(env, vptr);
+						if(xpath != path_unreachable && !isSubpath(path, xpath)){
+							return false; // Someone else takes care of this value for us.
+						}
 						enc_info& info = encounters[vptr];
 						if(count){
 							info.count++;
 							count = info.count == 1;
+							if(vptr->type() == nix::nAttrs){
+								for(auto& b : *vptr->attrs()){
+									seenSymbols.insert(b.name);
+								}
+							}
 						}
 						bool reachableChanged = !info.reachable && reachable;
 						if(reachable){
@@ -437,9 +445,7 @@ static void formatValue(RewriteState& state, const BasicChartValueInfo* path, co
 						return false;
 					}(&value, true, true);
 					
-					if(encounters[&value].count != 1){
-						useLet = wantRecursive = true;
-					}
+					bool useLet = encounters[&value].count != 1 && lookup(env, &value) == path_unreachable;
 
 					auto itr = encounters.begin();
 					while(itr != encounters.end()){
@@ -453,6 +459,7 @@ static void formatValue(RewriteState& state, const BasicChartValueInfo* path, co
 					}
 
 					if(useLet){
+						getAllSymbols(env, seenSymbols);
 						struct value_field_info{
 							const nix::Value* vptr;
 							uint32_t topology;
@@ -463,7 +470,8 @@ static void formatValue(RewriteState& state, const BasicChartValueInfo* path, co
 						for(auto mapping : encounters){
 							cseVector.push_back({
 								.vptr = mapping.first,
-								.topology = state.cache.components.lookupTopologyIndex(mapping.first)
+								.topology = state.cache.components.lookupTopologyIndex(mapping.first),
+								.symbol = nix::Symbol()
 							});
 						}
 						std::sort(cseVector.begin(),cseVector.end(),[](auto left,auto right){ return left.topology < right.topology; });
@@ -472,9 +480,15 @@ static void formatValue(RewriteState& state, const BasicChartValueInfo* path, co
 						{
 							auto read = cseVector.begin();
 							auto write = read;
+							uint32_t dc = 0;
 							while(read != cseVector.end()){
 								if(lookup(&newEnv, read->vptr) == path_unreachable){
-									read->symbol = generateSymbol(state.eval().symbols);
+									while(!read->symbol){
+										nix::Symbol sym = state.eval().symbols.create("rec" + std::to_string(dc++));
+										if(seenSymbols.insert(sym).second){
+											read->symbol = sym;
+										}
+									}
 									newEnv.addSymbol(state, read->symbol, read->vptr);
 									*write = *read;
 									write++;
@@ -483,23 +497,27 @@ static void formatValue(RewriteState& state, const BasicChartValueInfo* path, co
 							}
 							cseVector.resize(std::distance(cseVector.begin(),write));
 						}
-						std::visit([&](auto letTarget){
-							for(auto pair : cseVector){
-								BasicChartValueInfo pt{};
-								pt.pathName = pair.symbol;
-								pt.pathParent = path_env;
-								std::visit(
-									[&](auto letAttr){
-										formatValue(state, &pt, &newEnv, std::move(letAttr), *pair.vptr, true);
-									},
-									letTarget.makeStaticAttribute(state, pair.symbol)
-								);
-							}
-							formatValue(state, path_unreachable, &newEnv, std::move(letTarget).finish(state), value, true);
-						}, std::move(target).toLet(state));
-
-						return;
+						if(cseVector.size() != 0){
+							std::visit([&](auto letTarget){
+								for(auto pair : cseVector){
+									BasicChartValueInfo pt{};
+									pt.pathName = pair.symbol;
+									pt.pathParent = path_env;
+									std::visit(
+										[&](auto letAttr){
+											formatValue(state, &pt, &newEnv, std::move(letAttr), *pair.vptr, true);
+										},
+										letTarget.makeStaticAttribute(state, pair.symbol)
+									);
+								}
+								formatValue(state, path, &newEnv, std::move(letTarget).finish(state), value, true);
+							}, std::move(target).toLet(state));
+							return;
+						}
+						wantRecursive = false; // Nevermind then! We would've made an empty let. This is possible when all values are already reachable from the parent env.
 					}
+
+					wantRecursive = wantRecursive && lookup(env, &value) == path_unreachable;
 				}
 
 				if(wantRecursive){

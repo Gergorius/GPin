@@ -2,16 +2,18 @@
 # Each nix test file contains a "verify" attribute which the tester evaluates. It normally returns a simple string such as "x successfully verified" as a confirmation that it ran. Note that the tester calls the OLD file's verify with the contents of both the OLD and NEW file.
 
 rec {
+	attrNames = set: builtins.sort (a: b: (builtins.unsafeGetAttrPos a set).line < (builtins.unsafeGetAttrPos b set).line) (builtins.attrNames set);
+
 	trivial-verify = {old, new, testname, ...}:
-		assert old // old.update == new; "${testname}: ${builtins.concatStringsSep ", " (builtins.attrNames old)}";
+		assert old // old.update == new; "${testname}: ${builtins.concatStringsSep ", " (attrNames old)}";
 	
 	check-verify = {old, new, testname, ...}:
 		let
 			all_checks = builtins.mapAttrs (
-				name: body: builtins.addErrorContext "while running checker '${name}'" (assert body new.${name}; name)
+				name: body: builtins.addErrorContext "while running checker '${name}'" (assert body new.${name}; null)
 			) old.check;
 		in
-			"${testname}: ${builtins.concatStringsSep ", " (builtins.attrValues all_checks)}";
+			builtins.deepSeq all_checks "${testname}: ${builtins.concatStringsSep ", " (attrNames old.check)}";
 	
 	cycle-safe-eq = l: r:
 		let
@@ -58,7 +60,4 @@ rec {
 		assert !cycle-safe-eq rec {keke.fofo = keke;keke.baba = 5;} rec {keke.fofo = keke;keke.baba = 6;};
 		assert  cycle-safe-eq rec {keke.fofo = keke;keke.baba = keke;} rec {keke.fofo = keke;keke.baba = keke;}; # This is why we do not use depth cap.
 		true;
-	
-	verify-members = {old, new, testname, ...}:
-		builtins.concatStringsSep ";" (builtins.attrValues (builtins.mapAttrs (name: old-m: builtins.addErrorContext "while running verifier for ${name}" (old-m.verify {old = old-m;new = new.${name};testname = "${testname}.${name}";})) old));
 }

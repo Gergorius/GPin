@@ -1,34 +1,24 @@
+{ pkgs ? (import ./pins.nix).pkgs, lib ? pkgs.lib }:
 let
-	pins = import ./pins.nix;
+	fs = lib.fileset;
 
-	build = { pkgs ? pins.pkgs }:
-		let {
-			inherit (pkgs) stdenv lib;
-			
-			fs = lib.fileset;
-
-			gpin-derivation = pkgs.clangStdenv.mkDerivation {
-				name = "gpin";
-				src = fs.toSource {
-					root = ./.;
-					fileset = fs.unions [ ./src ./CMakeLists.txt ./tests ];
-				};
-				nativeBuildInputs = with pkgs; [
-					cmake
-					nix.dev
-					pkg-config
-				];
-				buildInputs = with pkgs.nix.libs; [
-					nix-expr
-					nix-cmd
-				];
-				doCheck = true;
-			};
-
-			body = {
-				gpin-update = gpin-derivation;
-				gpin = pkgs.callPackage ./gpin body;
-			};
+	gpin-update = pkgs.clangStdenv.mkDerivation {
+		name = "gpin";
+		src = fs.toSource {
+			root = ./.;
+			fileset = fs.unions [ ./src ./CMakeLists.txt ./tests ];
 		};
-in
-	build
+		nativeBuildInputs = with pkgs; [
+			cmake
+			nix.dev
+			pkg-config
+		];
+		buildInputs = with pkgs.nix.libs; [
+			nix-expr
+			nix-cmd
+		];
+		doCheck = true;
+	};
+in {
+	inherit gpin-update;
+}

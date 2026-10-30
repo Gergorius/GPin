@@ -4,6 +4,8 @@ find_package(PkgConfig REQUIRED)
 
 project(GPin)
 
+set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_BINDIR}")
+
 if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
 	add_compile_options(-fstandalone-debug)
 endif()
@@ -22,6 +24,8 @@ pkg_check_modules(nix REQUIRED IMPORTED_TARGET nix-expr nix-cmd)
 
 target_link_libraries(gpin-update PRIVATE PkgConfig::nix)
 target_link_libraries(gpin-natives PRIVATE PkgConfig::nix)
+
+target_link_libraries(gpin-update PRIVATE gpin-natives)
 
 target_sources(gpin-update
 	PRIVATE

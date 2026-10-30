@@ -92,7 +92,7 @@ uint32_t visitValue(const nix::Value* value, std::unordered_map<const nix::Value
 template<bool countAttributes = false>
 uint32_t visitValue(const nix::Value* value, uint32_t limit);
 
-[[clang::always_inline]]
+[[gnu::always_inline]]
 inline bool isCompoundValue(const nix::Value* value){
 	switch(internalType(*value)){
 		case nix::tAttrs:
@@ -106,7 +106,7 @@ inline bool isCompoundValue(const nix::Value* value){
 	}
 }
 
-[[clang::always_inline]]
+[[gnu::always_inline]]
 inline uint32_t compoundValueSize(const nix::Value* value){
 	switch(internalType(*value)){
 		case nix::tAttrs:
@@ -123,8 +123,8 @@ inline uint32_t compoundValueSize(const nix::Value* value){
 }
 
 template<typename Visitor,typename... Args>
-[[clang::always_inline]]
-bool visitSubvalues(const nix::Value* value, Visitor visitor, Args&&... args){
+[[gnu::always_inline]]
+inline bool visitSubvalues(const nix::Value* value, Visitor visitor, Args&&... args){
 	switch(internalType(*value)){
 		case nix::tAttrs:
 			for(const nix::Attr& a : *value->attrs()){
