@@ -1,6 +1,7 @@
 #include <gc/gc_allocator.h>
 #include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-error.hh>
+#include <nix/expr/primops.hh>
 #include <nix/expr/value.hh>
 #include <nix/expr/eval.hh>
 #include <nix/util/error.hh>
@@ -203,15 +204,6 @@ namespace{
 		}
 	}
 
-	template<auto target,std::pair<uint32_t,bool> arityPosInfo>
-	void invokeWithNix(nix::EvalState& state, const nix::PosIdx pos, nix::Value** args, nix::Value& v){
-		if constexpr(arityPosInfo.second){
-			invokeHelper<arityPosInfo.first>(args, target, state,pos, v);
-		}else{
-			invokeHelper<arityPosInfo.first>(args, target, state, v);
-		}
-	}
-
 	template<typename Fun,typename... Args>
 	constexpr std::pair<uint32_t,bool> findArity(){
 		if constexpr(std::is_invocable_v<Fun, nix::EvalState&, const nix::PosIdx&, nix::Value&, Args...>){
@@ -242,7 +234,18 @@ namespace{
 	inline nix::Value primopValue = mkPrimOp(primOpForTarget<target, arity>);
 }
 
+template<auto target,std::pair<uint32_t,bool> arityPosInfo = findArity<decltype(target)>()>
+void adaptToNix(nix::EvalState& state, const nix::PosIdx pos, nix::Value** args, nix::Value& v){
+	if constexpr(arityPosInfo.second){
+		invokeHelper<arityPosInfo.first>(args, target, state,pos, v);
+	}else{
+		invokeHelper<arityPosInfo.first>(args, target, state, v);
+	}
+}
+
 template<auto target>
-inline nix::Value& primop = primopValue<&invokeWithNix<target, findArity<decltype(target)>()>, findArity<decltype(target)>().first>;
+inline nix::Value& primop = primopValue<&adaptToNix<target, findArity<decltype(target)>()>, findArity<decltype(target)>().first>;
+
+void mkLibrary(nix::EvalState& state, Value& v);
 
 }

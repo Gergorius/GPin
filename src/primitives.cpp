@@ -1,13 +1,18 @@
 
+#include <dlfcn.h>
 #include <gc/gc_allocator.h>
 #include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-error.hh>
 #include <nix/expr/eval.hh>
 #include <nix/expr/primops.hh>
+#include <nix/expr/symbol-table.hh>
 #include <nix/expr/value.hh>
 #include <nix/expr/value/context.hh>
+#include <nix/store/build-result.hh>
 #include <nix/store/derivations.hh>
+#include <nix/util/error.hh>
 #include <nix/util/file-system.hh>
+#include <nix/util/hash.hh>
 #include <nix/util/os-string.hh>
 #include <nix/util/pos-idx.hh>
 #include <nix/util/source-path.hh>
@@ -15,8 +20,11 @@
 #include <nix/util/users.hh>
 #include <nix/util/processes.hh>
 #include <optional>
+#include <regex>
 
 #include "primitives.h"
+
+extern "C" void gpin_lib(EvalState& state, Value& v);
 
 namespace gpin{
 
@@ -95,12 +103,70 @@ void exec(EvalState& state, const PosIdx& pos, Value& v, Value* args){
 	v.mkAttrs(builder);
 }
 
+std::regex fod_error_pattern = std::regex("hash mismatch in fixed-output derivation '(.*?)':\n  specified: (.*?)\n     got:    (.*)");
+std::regex color_pattern = std::regex("\\x1b\\[35;1m(.*)\\x1b\\[0m");
+
+static void getDerivationHash(EvalState& state, const nix::PosIdx& pos, Value& v, Value* d){
+
+	// I spent TWO days. TWO days of my life trying to figure out a better and more reliable way to do this. As it is now, the implementation is terrible. However, this primitive enables some functionality too good not to have.
+
+	try{
+		state.realisePath(pos, *d);
+	}catch(nix::Error& err){
+		std::string msg = err.message();
+		std::smatch matches;
+		if(std::regex_match(msg,matches, fod_error_pattern)){
+			std::string hash_str = matches[3].str();
+			std::smatch cmatches;
+			if(std::regex_match(hash_str,cmatches,color_pattern)){
+				hash_str = cmatches[1].str();
+			}
+			nix::Hash hash = nix::Hash::parseAny(hash_str, std::nullopt);
+			v.mkString(hash.to_string(nix::HashFormat::Nix32, false),state.mem);
+			return;
+		}else{
+			err.addTrace(nix::Pos(),"'getDerivationHash' could not resolve this error to a hash");
+			throw;
+		}
+	}
+	v.mkNull();
 }
 
-extern "C" void gpin_exec(EvalState& state, Value& v){
-	v = gpin::primop<gpin::exec>;
+static void getDllPath(EvalState& state, const nix::PosIdx& pos, Value& v, Value* dummy){
+	Dl_info info;
+	if(dladdr(reinterpret_cast<void*>(&gpin_lib), &info)){
+		v.mkString(info.dli_fname, state.mem);
+	}else{
+		v.mkNull();
+	}
 }
 
-extern "C" void gpin_getNixCacheDir(EvalState& state, Value& v){
-	v.mkPath(state.rootPath(nix::absPath(nix::getCacheDir()).string()), state.mem);
+static void mkLibraryImpl(nix::EvalState& state, Value& v, bool isGPinUpdate){
+	nix::BindingsBuilder builder = state.buildBindings(0x10);
+	nix::SymbolTable& symbols = state.symbols;
+	if(state.settings.enableNativeCode){
+		// I don't think we even need this.
+		// builder.push_back({symbols.create("exec"), &primop<exec>});
+	}
+
+	// True if this is the "builtins.gpin" defined by gpin-update.
+	builder.push_back({symbols.create("isUpdater"), state.getBool(isGPinUpdate)});
+
+	// Attempts to realize the derivation or store path and, if it fails with a hash mismatch error, returns the observed hash. If there was no error it returns null instead.
+	builder.push_back({symbols.create("getDerivationHash"), &primop<getDerivationHash>});
+
+	// Path to the shared library which exported this.
+	builder.alloc("path").mkApp(&primop<getDllPath>, &Value::vNull);
+
+	v.mkAttrs(builder);
+}
+
+void mkLibrary(nix::EvalState& state, Value& v){
+	mkLibraryImpl(state, v, true);
+}
+
+}
+
+extern "C" void gpin_lib(EvalState& state, Value& v){
+	gpin::mkLibraryImpl(state, v, false);
 }

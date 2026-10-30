@@ -381,13 +381,13 @@ public:
 
 // Isolated expression with a dynamic precedence.
 class IsolatedExpressionTarget : private RawSyntaxReference{
-	precedence precedence;
+	precedence level;
 public:
 	static constexpr bool exists(){ return true; }
 	const RawSyntaxReference& getSyntaxReference(){ return *this; }
 	SyntaxReference toSyntaxReference() && { return std::move(*this).asIsolated(); }
 	nix::Expr* getExpression(){ return this->expression; }
-	inline explicit IsolatedExpressionTarget(SyntaxReference&& sr, enum precedence prec): RawSyntaxReference(std::move(sr)), precedence(prec){}
+	inline explicit IsolatedExpressionTarget(SyntaxReference&& sr, enum precedence prec): RawSyntaxReference(std::move(sr)), level(prec){}
 	NewExpressionTarget toSimple(FormatState& state,enum precedence maximumPrecedence = precedence::bottomLevel) &&;
 	inline std::variant<IsolatedExpressionTarget> toIsolated(FormatState& state) && { return std::move(*this); }
 	std::variant<IsolatedBindingsTarget,NewBindingsTarget> toBindings(FormatState& state,bool recursive) &&;
@@ -427,12 +427,12 @@ public:
 
 class NewExpressionTarget{
 	Cursor cursor;
-	precedence precedence;
+	precedence level;
 public:
 	DECLARE_SET_INDENT_INFO(NewExpressionTarget);
 	static constexpr bool exists(){ return false; }
 	static constexpr nix::Expr* getExpression(){ return nullptr; }
-	inline explicit NewExpressionTarget(Cursor cur,enum precedence prec): cursor(std::move(cur)), precedence(prec){}
+	inline explicit NewExpressionTarget(Cursor cur,enum precedence prec): cursor(std::move(cur)), level(prec){}
 	inline std::variant<NewExpressionTarget> toIsolated(FormatState& state) && { return std::move(*this); }
 	NewExpressionTarget toSimple(FormatState& state,enum precedence maximumPrecedence = precedence::bottomLevel) &&;
 	Cursor toCursor() && { return std::move(cursor); }

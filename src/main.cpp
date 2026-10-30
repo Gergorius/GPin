@@ -1,5 +1,7 @@
 #include "update.h"
 #include "steal.h"
+#include "primitives.h"
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <nix/cmd/command.hh>
@@ -7,6 +9,7 @@
 #include <nix/expr/attr-set.hh>
 #include <nix/expr/eval-gc.hh>
 #include <nix/expr/eval-settings.hh>
+#include <nix/expr/primops.hh>
 #include <nix/expr/value.hh>
 #include <nix/main/common-args.hh>
 #include <nix/main/shared.hh>
@@ -18,7 +21,6 @@
 #include <nix/util/ref.hh>
 #include <nix/util/source-path.hh>
 #include <nix/util/types.hh>
-#include <sstream>
 #include <vector>
 
 namespace gpin{
@@ -28,10 +30,19 @@ EXPORT_PRIVATE_MEMBER(getInnerAutoArgs, &nix::MixEvalArgs::autoArgs);
 using nix::ref;
 using nix::Strings;
 
+static nix::RegisterPrimOp primop_gpin_lib(nix::PrimOp{
+	.name = "gpin",
+	.arity = 0,
+	.addTrace = false,
+	.impl = &adaptToNix<mkLibrary>,
+	.internal = false,
+});
+
 struct GPinCommand : virtual nix::RootArgs, virtual nix::StoreCommand, virtual nix::MixEvalArgs, virtual nix::MixCommonArgs{
 	std::shared_ptr<nix::Store> evalStore;
 	std::shared_ptr<EvalStateForUpdate> evalState;
 	std::vector<std::string> targetFiles;
+	std::string updaterName = "update";
 	bool helpRequested = false;
 
 	GPinCommand(const std::string& programName);
@@ -59,6 +70,15 @@ GPinCommand::GPinCommand(const std::string& programName) : MixCommonArgs(program
 	removeFlag("arg-from-file");
 	removeFlag("arg-from-stdin");
 	addFlag({
+		.longName = "updater-name",
+		.description = "Override the name of the updater attribute",
+		.category = nix::miscCategory,
+		.labels = {"name"},
+		.handler = {[&](std::string name) {
+			updaterName = std::move(name);
+		}},
+	});
+	addFlag({
 		.longName = "help",
 		.description = "Show usage information.",
 		.category = nix::miscCategory,
@@ -82,7 +102,7 @@ void GPinCommand::run(ref<nix::Store>){
 
 	EvalStateForUpdate* state = getEvalState().operator->();
 
-	state->updateSymbol = state->symbols.create("update");
+	state->updateSymbol = state->symbols.create(updaterName);
 
 	nix::Bindings* autoArgs = getAutoArgs(*state);
 	
@@ -111,35 +131,55 @@ void GPinCommand::run(ref<nix::Store>){
 
 		state->finishLoad();
 
-		std::vector<std::pair<std::filesystem::path,std::string>> writeTasks;
+		struct pathPair{
+			std::filesystem::path original;
+			std::filesystem::path temp;
+		};
 
-		// NOT writing any files if there is an error is entirely reasonable.
+		std::vector<pathPair> replaceTasks;
 
-		bool hasSoftError = false;
+		try{
+			bool hasSoftError = false;
 
-		{
-			RewriteCache cache{*state};
-			for(auto& pairing : state->fileSources){
-				const nix::SourcePath& sp = pairing.first;
-				auto physicalPath = sp.getPhysicalPath();
-				if(!physicalPath){
-					std::cerr << "Error: could not resolve path for writing: " << sp.to_string() << std::endl;
-					hasSoftError = true;
+			{
+				RewriteCache cache{*state};
+				for(auto& pairing : state->fileSources){
+					const nix::SourcePath& sp = pairing.first;
+					auto physicalPath = sp.getPhysicalPath();
+					if(!physicalPath){
+						std::cerr << "Error: could not resolve path for writing: " << sp.to_string() << std::endl;
+						hasSoftError = true;
+					}
+					std::filesystem::path& originalPath = physicalPath.value();
+					std::filesystem::path tempPath;
+					uint32_t dc = 0;
+					do{
+						tempPath = originalPath;
+						tempPath.replace_filename(tempPath.filename().string() + std::to_string(dc++) + ".tmp");
+					}while(std::filesystem::exists(tempPath));
+					std::ofstream output = std::ofstream(tempPath);
+					replaceTasks.push_back({std::move(originalPath), std::move(tempPath)});
+					state->doRewrite(cache, output, pairing.second);
+					output.flush();
+					output.close();
 				}
-				std::ostringstream ostr;
-				state->doRewrite(cache, ostr, pairing.second);
-				writeTasks.push_back({std::move(physicalPath).value(), std::move(ostr).str()});
 			}
-		}
 
-		if(hasSoftError){
-			throw nix::Exit(1);
-		}
+			if(hasSoftError){
+				throw nix::Exit(1);
+			}
 
-		for(auto& p : writeTasks){
-			std::ofstream f{p.first};
-			f << p.second;
-			f.close();
+			for(auto& p : replaceTasks){
+				std::filesystem::rename(p.temp,p.original);
+				p.temp.clear();
+			}
+		}catch(...){
+			for(auto& p : replaceTasks){
+				if(!p.temp.empty()){
+					std::filesystem::remove(p.temp);
+				}
+			}
+			throw;
 		}
 	}
 }

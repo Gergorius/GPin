@@ -74,4 +74,76 @@ in rec {
 				{inherit b;};
 	};
 	check.attr-cse = v: ceq attr-cse.update.target v.target;
+
+	mixed-cse-0 = rec {
+		target = null;
+		update.target = let
+			v0 = {v1 = v1;};
+			v1 = [v0];
+			in
+				v0;
+	};
+	check.mixed-cse-0 = v: ceq mixed-cse-0.update.target v.target;
+
+	mixed-cse-1 = rec {
+		target = null;
+		update.target = let
+			v0 = {v1 = v1;};
+			v1 = [v2 v2];
+			v2 = [v0];
+			in
+				v0;
+	};
+	check.mixed-cse-1 = v: ceq mixed-cse-1.update.target v.target;
+
+	mixed-cse-2 = {
+		target = null;
+		update.target = let
+			v0 = {v1 = v1;};
+			v1 = [v0];
+			in
+				v0;
+	};
+	check.mixed-cse-2 = v: ceq mixed-cse-2.update.target v.target;
+
+	mixed-cse-3 = {
+		target = null;
+		update.target = let
+			v0 = {v1 = v1;};
+			v1 = [v2 v2];
+			v2 = [v0];
+			in
+				v0;
+	};
+	check.mixed-cse-3 = v: ceq mixed-cse-3.update.target v.target;
+
+	mixed-cse-4 = rec {
+		target0 = null;
+		target1 = null;
+		update =
+			let
+				target0 = {v0 = v0;};
+				target1 = {self = target1; v1 = v1;};
+				v0 = [v1 v1];
+				v1 = [v0];
+			in {
+				inherit target0 target1;
+			};
+	};
+	check.mixed-cse-4 = v: ceq mixed-cse-4.update.target0 v.target0 && ceq mixed-cse-4.update.target1 v.target1;
+
+	mixed-cse-5 = rec {
+		target0 = null;
+		target1 = null;
+		update =
+			let
+				target0 = {a = v0;};
+				v0 = [v1 v1];
+				v1 = [v0];
+				target1 = {b = v0;};
+			in {
+				inherit target0 target1;
+			};
+	};
+	check.mixed-cse-5 = v: ceq mixed-cse-5.update.target0 v.target0 && ceq mixed-cse-5.update.target1 v.target1;
 }

@@ -39,8 +39,8 @@ InternalType internalType(const nix::Value& v){
 	return std::invoke(getInternalType,v);
 }
 
-#pragma clang diagnostic error "-Wswitch"
-#pragma clang diagnostic error "-Wimplicit-fallthrough"
+#pragma GCC diagnostic error "-Wswitch"
+#pragma GCC diagnostic error "-Wimplicit-fallthrough"
 
 static void unusedButMustCompile(nix::Value& value){
 
@@ -65,6 +65,7 @@ static void unusedButMustCompile(nix::Value& value){
 		case nix::tString:
 		case nix::tPath:
 		case nix::tNumberOfInternalTypes:
+			break;
 	}
 }
 

@@ -105,23 +105,24 @@ struct RelocatingVisitor{
 #endif
 };
 
+template<typename T> struct replacement{ using type = Greedy<T>; };
+template<> struct replacement<nix::ExprAttrs>{ using type = RecordedExprAttrs; };
+#define SELF_REPLACE(name) template<> struct replacement<nix::name>{ using type = nix::name; }
+SELF_REPLACE(Expr);
+SELF_REPLACE(ExprFloat);
+SELF_REPLACE(ExprInt);
+SELF_REPLACE(ExprString);
+SELF_REPLACE(ExprVar);
+SELF_REPLACE(ExprPath);
+SELF_REPLACE(ExprInheritFrom);
+SELF_REPLACE(ExprBlackHole);
+
 struct ObtrusiveVisitor : private RelocatingVisitor{
 	using RelocatingVisitor::RelocatingVisitor;
 	const RelocatingVisitor& rv() const{
 		return *this;
 	}
 	bool operator()(nix::Expr* expr) const{ rv()(expr); RF; }
-	template<typename T> struct replacement{ using type = Greedy<T>; };
-	template<> struct replacement<nix::ExprAttrs>{ using type = RecordedExprAttrs; };
-#define SELF_REPLACE(name) template<> struct replacement<nix::name>{ using type = nix::name; }
-	SELF_REPLACE(Expr);
-	SELF_REPLACE(ExprFloat);
-	SELF_REPLACE(ExprInt);
-	SELF_REPLACE(ExprString);
-	SELF_REPLACE(ExprVar);
-	SELF_REPLACE(ExprPath);
-	SELF_REPLACE(ExprInheritFrom);
-	SELF_REPLACE(ExprBlackHole);
 	template<typename T>
 	requires(!std::is_same_v<T, nix::Expr>)
 	bool operator()(T* op) const{

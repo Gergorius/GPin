@@ -24,8 +24,8 @@
 #include <boost/multi_index_container.hpp>
 #include <variant>
 
-#pragma clang diagnostic error "-Wswitch"
-#pragma clang diagnostic error "-Wimplicit-fallthrough"
+#pragma GCC diagnostic error "-Wswitch"
+#pragma GCC diagnostic error "-Wimplicit-fallthrough"
 
 // TODO
 // Handle unreferencable symbols in cycles
@@ -337,7 +337,7 @@ std::variant<std::monostate,IsolatedExpressionTarget,ExistingBindingsTarget> Exi
 }
 
 NewExpressionTarget IsolatedExpressionTarget::toSimple(FormatState& state,enum precedence maxPrec) &&{
-	if(maxPrec < precedence){
+	if(maxPrec < level){
 		const NixToken* cursor = boundary.data();
 		if(cursor->type == '('){
 			const NixToken* begin = cursor++;
@@ -348,7 +348,7 @@ NewExpressionTarget IsolatedExpressionTarget::toSimple(FormatState& state,enum p
 			}
 		}
 	}
-	return NewExpressionTarget(state.addRewrite(beginOffset(), endOffset()), precedence).toSimple(state,maxPrec);
+	return NewExpressionTarget(state.addRewrite(beginOffset(), endOffset()), level).toSimple(state,maxPrec);
 }
 
 std::variant<IsolatedBindingsTarget,NewBindingsTarget> IsolatedExpressionTarget::toBindings(FormatState& state,bool recursive) &&{
@@ -396,12 +396,12 @@ std::variant<std::pair<NewExpressionTarget,NewExpressionTarget>> IsolatedExpress
 
 
 NewExpressionTarget NewExpressionTarget::toSimple(FormatState& state,enum precedence maxPrec) &&{
-	if(maxPrec < precedence){
+	if(maxPrec < level){
 		cursor << "(";
 		Cursor tmp = cursor.split();
 		cursor << ")";
 		cursor = std::move(tmp);
-		precedence = precedence::topLevel;
+		level = precedence::topLevel;
 	}
 	return std::move(*this);
 }
@@ -424,7 +424,7 @@ std::variant<NewListTarget> NewExpressionTarget::toList(FormatState& state) &&{
 }
 
 std::variant<std::pair<NewExpressionTarget,NewExpressionTarget>> NewExpressionTarget::toApp(FormatState& state) &&{
-	if(precedence::app < precedence){
+	if(precedence::app < level){
 		return std::move(*this).toSimple(state, precedence::app).toApp(state);
 	}
 	Cursor lBody = cursor.split();
@@ -442,7 +442,7 @@ std::variant<NewLetTarget> NewExpressionTarget::toLet(FormatState& state) &&{
 
 NewExpressionTarget NewLetTarget::finish(FormatState& state) &&{
 	cursor.indentInfo.level--;
-	cursor.newLine();
+	cursor.newLine(cursor.lookbehind("t"));
 	cursor << "in";
 	cursor.indentInfo.level++;
 	cursor.newLine(true);
