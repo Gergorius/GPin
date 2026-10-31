@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.23)
 
 find_package(PkgConfig REQUIRED)
 
+pkg_check_modules(nix-expr REQUIRED IMPORTED_TARGET nix-expr)
+pkg_check_modules(nix-cmd REQUIRED IMPORTED_TARGET nix-cmd)
+
 project(GPin)
 
 set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_BINDIR}")
@@ -20,10 +23,9 @@ add_executable(gpin-update)
 target_compile_features(gpin-update PRIVATE cxx_std_26)
 target_compile_features(gpin-natives PRIVATE cxx_std_26)
 
-pkg_check_modules(nix REQUIRED IMPORTED_TARGET nix-expr nix-cmd)
-
-target_link_libraries(gpin-update PRIVATE PkgConfig::nix)
-target_link_libraries(gpin-natives PRIVATE PkgConfig::nix)
+target_link_libraries(gpin-update PRIVATE PkgConfig::nix-expr)
+target_link_libraries(gpin-update PRIVATE PkgConfig::nix-cmd)
+target_link_libraries(gpin-natives PRIVATE PkgConfig::nix-expr)
 
 target_link_libraries(gpin-update PRIVATE gpin-natives)
 
