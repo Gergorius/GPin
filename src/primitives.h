@@ -6,6 +6,7 @@
 #include <nix/expr/eval.hh>
 #include <nix/util/error.hh>
 #include <nix/util/pos-idx.hh>
+#include <nix/util/source-path.hh>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
@@ -20,6 +21,7 @@ inline void toValue(EvalState& state, Value& v, nix::ExternalValueBase* e){ v.mk
 inline void toValue(EvalState& state, Value& v, nix::NixInt value){ v.mkInt(value); }
 inline void toValue(EvalState& state, Value& v, std::string_view s){ v.mkString(s,state.mem); }
 inline void toValue(EvalState& state, Value& v, nix::NixFloat f){ v.mkFloat(f); }
+inline void toValue(EvalState& state, Value& v, const nix::SourcePath& p){ v.mkPath(p, state.mem); }
 inline void toValue(EvalState& state, Value& v, nix::Value) = delete;
 
 template<typename T>

@@ -1,7 +1,7 @@
 rec {
 	memory.pkgs = {
 		url = "https://github.com/NixOS/nixpkgs";
-		rev = "1c89083e451e891152365b799595cf7790a43325";
+		rev = "1d060086d60cb76a40cf37109f979d88a5bd6396";
 		shallow = true;
 		update.rev = (builtins.fromJSON (builtins.readFile (builtins.fetchurl { url = "https://api.github.com/repos/NixOS/nixpkgs/commits/nixos-unstable"; }))).sha;
 	};

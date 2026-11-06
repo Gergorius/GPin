@@ -46,6 +46,7 @@ makeTrivialTest(expr "${INPUT_DIR}/expr.nix")
 makeTrivialTest(binary "${INPUT_DIR}/binary.nix")
 makeTrivialTest(cycle "${INPUT_DIR}/cycle.nix")
 
+
 file(MAKE_DIRECTORY "${TEST_OUTPUT_DIR}/dhash")
 add_test(NAME "dhash"
 	COMMAND
@@ -54,8 +55,25 @@ add_test(NAME "dhash"
 		--option build-dir ${TEST_OUTPUT_DIR}/dhash/nix-build
 		"${INPUT_DIR}/dhash.nix"
 		--arg sharedObject "$<TARGET_FILE:gpin-natives>"
-		--allow-unsafe-native-code-during-evaluation --no-out-link
+		--allow-unsafe-native-code-during-evaluation
+		--no-out-link
+		--show-trace
 )
 set_tests_properties("dhash" PROPERTIES
 	ENVIRONMENT "NIX_STATE_DIR=${TEST_OUTPUT_DIR}/dhash/nix-state;NIX_LOG_DIR=${TEST_OUTPUT_DIR}/dhash/nix-log"
+)
+
+file(MAKE_DIRECTORY "${TEST_OUTPUT_DIR}/buildlog")
+add_test(NAME "buildlog"
+	COMMAND
+		nix-instantiate --strict --raw
+		--store ${TEST_OUTPUT_DIR}/buildlog/nix-store
+		"${INPUT_DIR}/buildlog.nix"
+		--option build-dir ${TEST_OUTPUT_DIR}/buildlog/nix-build
+		--arg sharedObject "$<TARGET_FILE:gpin-natives>"
+		--allow-unsafe-native-code-during-evaluation
+		--show-trace
+)
+set_tests_properties("buildlog" PROPERTIES
+	ENVIRONMENT "NIX_STATE_DIR=${TEST_OUTPUT_DIR}/buildlog/nix-state;NIX_LOG_DIR=${TEST_OUTPUT_DIR}/buildlog/nix-log"
 )
