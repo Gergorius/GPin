@@ -4,10 +4,15 @@
 
 This header implements "greedy" nix expressions. Their maybeThunk functions produce "deep thunks" which are thunks that contain thunks for all subexpressions. If said subexpressions are also greedy, their thunks will also be deep and so on. No evaluation actually takes place, and forcing the deep thunks works as expected.
 
-There are three main special cases:
-- ExprAttrs gets evaluated, meaning calling it's maybeThunk WILL evaluate the dynamic attribute names.
+Several notes:
+- ExprAttrs is unsupported because it looks too change-prone.
 - ExprLet's inner ExprAttrs is treated as a part of ExprLet rather than as a proper subexpression.
 - ExprLambda does not try to make thunks of it's subexpressions. (For reasons that should be obvious!)
+- If ExprAssert's condition is an ExprOpEq, it is considered a part of ExprAssert and it's subexpressions are turned into thunks instead.
+
+Why custom expression types instead of a custom eval function?
+
+Suppose that instead of the types, we implemented a custom "greedyEval" function that takes an expression as an argument and builds our custom thunks. There are several complications to implementing such a function for some expression types. For example, ExprLet is considered change-prone enough that we would need to replace all it's subexpressions with temporary ones. (Including the subexpressions of the member attrs.) We cannot lose control of evaluation (by calling a nix-defined maybeThunk or eval) because not all maybeThunks return thunks and it is possible that two maybeThunks for two separate expressions return the exact same value meaning we might accidentally crawl the same thunk twice or crawl a thunk that is out of scope.
 
 */
 

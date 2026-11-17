@@ -238,6 +238,8 @@ static void detachedRewrite(RewriteState& state, RawSyntaxReference rsr){
 			isolatedRewrite(state, rsr.descendToIsolated(ptr));
 			return;
 		}
+	}else if(dynamic_cast<nix::ExprLambda*>(rsr.expression)){
+		return;
 	}
 	visitDynamicNixExpr(rsr.expression, mkSubexprs([&](nix::Expr* ex){
 		detachedRewrite(state, rsr.rawWithExpression(ex));
@@ -325,6 +327,8 @@ static void isolatedRewrite(RewriteState& state, SyntaxReference sr){
 		}else{
 			isolatedRewrite(state, std::move(ilt).finishNoCleanup(state).toSyntaxReference());
 		}
+	}else if(dynamic_cast<nix::ExprLambda*>(sr.expression)){
+		return;
 	}else{
 		visitDynamicNixExpr(sr.expression,mkSubexprs([&](nix::Expr* const ex){
 			detachedRewrite(state, sr.rawWithExpression(ex));

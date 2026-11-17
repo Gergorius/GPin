@@ -11,6 +11,6 @@ in {
 			lldb
 		];
 		inputsFrom = [
-			(pkgs.callPackage ./build.nix { inherit pkgs; }).gpin-update
+			(pkgs.callPackage ./build.nix { inherit pkgs; })
 		];
 	}

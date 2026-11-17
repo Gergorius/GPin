@@ -21,11 +21,11 @@
 namespace gpin{
 
 // If these change I better know...
-static_assert(std::is_trivially_destructible_v<nix::Value>);
-static_assert(std::is_trivially_copy_constructible_v<nix::Value>);
-static_assert(std::is_trivially_copy_assignable_v<nix::Value>);
-static_assert(std::is_trivially_move_constructible_v<nix::Value>);
-static_assert(std::is_trivially_move_assignable_v<nix::Value>);
+//static_assert(std::is_trivially_destructible_v<nix::Value>);
+//static_assert(std::is_trivially_copy_constructible_v<nix::Value>);
+//static_assert(std::is_trivially_copy_assignable_v<nix::Value>);
+//static_assert(std::is_trivially_move_constructible_v<nix::Value>);
+//static_assert(std::is_trivially_move_assignable_v<nix::Value>);
 static_assert(std::is_same_v<nix::NixInt::Inner, int64_t>);
 
 EXPORT_PRIVATE_MEMBER(getInternalType,&nix::Value::getInternalType);

@@ -264,8 +264,8 @@ SyntaxReference RawSyntaxReference::descendToIsolated(nix::ExprAttrs* attrs){
 SyntaxReference RawSyntaxReference::descendToIsolated(nix::ExprLet* let){
 	const NixToken* cursor = boundary.data();
 
-	const NixToken* bestTokLet;
-	const NixToken* bestTokIn;
+	const NixToken* bestTokLet = nullptr;
+	const NixToken* bestTokIn = nullptr;
 
 	while(cursor != boundary.data() + boundary.size()){
 		if(cursor->type == NixToken::kind_type::LET){
@@ -273,17 +273,19 @@ SyntaxReference RawSyntaxReference::descendToIsolated(nix::ExprLet* let){
 				goto continueOuter;
 			}
 			const NixToken* tokLet = cursor;
-			const NixToken* tokIn = cursor;
+			const NixToken* tokIn = cursor + 1;
 			walkToToken(tokIn, NixToken::kind_type::IN_KW);
 
 			nix::PosIdx pos = nix::noPos;
 			for(auto& def : let->attrs->attrs.value()){
-				uint32_t off = origin.offsetOf(def.second.pos);
-				if(off < tokLet->begin){
-					goto breakOuter;
-				}
-				if(tokIn->end < off){
-					goto continueOuter;
+				if(def.second.pos != nix::noPos){
+					uint32_t off = origin.offsetOf(def.second.pos);
+					if(off < tokLet->begin){
+						goto breakOuter;
+					}
+					if(tokIn->begin < off){
+						goto continueOuter;
+					}
 				}
 			}
 			bestTokLet = tokLet;
@@ -300,7 +302,7 @@ breakOuter:
 	}
 	return RawSyntaxReference{
 		.origin = origin,
-		.boundary = {bestTokIn, end},
+		.boundary = {bestTokLet, end},
 		.expression = let,
 	}.asIsolated();
 }
